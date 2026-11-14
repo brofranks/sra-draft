@@ -19,7 +19,7 @@ use num_bigint::BigUint;
 use crate::backend::{
     Alignment, Backend, BoolOp, Column, Function, MapSpec, Members, Refinement, Values, transfer,
 };
-use crate::scalar::{ScalarKind, ScalarSort, compare, successor};
+use crate::scalar::{ScalarKind, ScalarSort, check_packed, compare, successor};
 use crate::util::dag::{Dag, Exhausted, Grow, Map, NeedGrowth, NodeRef, Shared, structural_hash};
 
 /// Initial arena sizes, large enough that collection alone recovers most
@@ -618,6 +618,7 @@ impl<L: Layout> Column for SparseColumn<L> {
     /// The predicate holding exactly at the sorted, distinct `values`, with
     /// adjacent points coalesced into runs.
     fn set(&self, values: &[u64]) -> Function {
+        check_packed(self.sort, values);
         let l = self.l;
         let (mut entries, mut next) = (Vec::new(), Vec::new());
         let default = points(
@@ -894,6 +895,7 @@ impl<L: Layout> Column for SparseColumn<L> {
         slot_labels: &mut Vec<u32>,
         scratch: &mut Values,
     ) -> Function {
+        check_packed(self.sort, keys);
         let l = self.l;
         let Values {
             transitions,

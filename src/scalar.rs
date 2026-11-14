@@ -110,6 +110,25 @@ impl ScalarSort {
     }
 }
 
+/// Checks that `values` are sorted, distinct, and encoded in `sort`.
+pub fn check_packed(sort: ScalarSort, values: &[u64]) {
+    let words = sort.words();
+    assert!(
+        values.len().is_multiple_of(words),
+        "values are not packed at the sort's word stride"
+    );
+    assert!(
+        values.chunks_exact(words).all(|v| sort.accepts(v)),
+        "value is outside the column sort"
+    );
+    assert!(
+        values
+            .chunks_exact(words)
+            .is_sorted_by(|a, b| compare(a, b).is_lt()),
+        "values are not sorted and distinct"
+    );
+}
+
 /// Numeric order of two equal-length little-endian encodings.
 #[inline(always)]
 pub fn compare(left: &[u64], right: &[u64]) -> Ordering {

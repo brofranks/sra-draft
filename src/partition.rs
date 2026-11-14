@@ -10,7 +10,7 @@
 use std::ops::ControlFlow;
 
 use crate::backend::{Alignment, Function, Refinement, Values};
-use crate::context::{ColumnId, Context, check_packed};
+use crate::context::{ColumnId, Context};
 
 /// A borrowed raw finite partition handle.
 ///
@@ -206,7 +206,7 @@ impl Context {
     /// nondefault labels.
     ///
     /// Ground-row construction has already normalized input order and repeated
-    /// cases; this boundary checks that contract without copying the keys or
+    /// cases; the column checks that contract without copying the keys or
     /// labels.
     ///
     /// # Panics
@@ -228,7 +228,6 @@ impl Context {
             case_labels.len() * c.sort().words(),
             "one packed key per case label"
         );
-        check_packed(c.sort(), keys);
         assert!(
             case_labels.iter().all(|&label| label != default),
             "an explicit case must differ from the default"

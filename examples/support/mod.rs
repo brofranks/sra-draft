@@ -2,10 +2,11 @@
 //!
 //! Every example states its expected outcome independently of the engine: an
 //! ordinary Rust computation, or a table written out by hand. These helpers
-//! hold the three idioms that independence keeps producing - a worklist
-//! fixpoint, a comparison against rows rebuilt in the engine's own layout, and
-//! decoding the members of a predicate - so each example spends its lines on
-//! what it actually demonstrates. The directory has no `main.rs`, so Cargo
+//! hold the four idioms that independence keeps producing - a worklist
+//! fixpoint, a comparison against rows rebuilt in the engine's own layout,
+//! decoding the members of a predicate, and reporting a property against its
+//! hand-derived outcome - so each example spends its lines on what it actually
+//! demonstrates. The directory has no `main.rs`, so Cargo
 //! does not treat it as an example target; each example uses a subset, hence
 //! `dead_code`.
 
@@ -68,6 +69,20 @@ pub fn members(p: &Predicate) -> Vec<Vec<u64>> {
         out.push(value.clone());
     }
     out
+}
+
+/// Prints a property's outcome and asserts the hand-derived expectation.
+///
+/// # Panics
+///
+/// Panics if `holds` differs from `wanted`.
+#[track_caller]
+pub fn check(name: &str, holds: bool, wanted: bool, explanation: &str) {
+    println!(
+        "{name} {}: {explanation}",
+        if holds { "PASS" } else { "FAIL" }
+    );
+    assert_eq!(holds, wanted, "unexpected outcome for {name}");
 }
 
 /// The paper's literal address form.

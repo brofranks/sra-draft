@@ -467,6 +467,31 @@ fn a_bit_test_is_rejected() {
     let _ = col(&roomy(), BV4).masked_eq(&[1], &[1]);
 }
 
+#[test]
+#[should_panic(expected = "values are not sorted and distinct")]
+fn a_set_of_unsorted_values_is_rejected() {
+    let _ = col(&roomy(), BV4).set(&[3, 1, 2]);
+}
+
+#[test]
+#[should_panic(expected = "values are not sorted and distinct")]
+fn a_set_of_repeated_values_is_rejected() {
+    let _ = col(&roomy(), BV4).set(&[1, 1]);
+}
+
+#[test]
+#[should_panic(expected = "value is outside the column sort")]
+fn a_set_value_outside_the_sort_is_rejected() {
+    let _ = col(&roomy(), BV4).set(&[16]);
+}
+
+#[test]
+#[should_panic(expected = "values are not sorted and distinct")]
+fn unsorted_partition_keys_are_rejected() {
+    let c = col(&roomy(), BV4);
+    let _ = c.values(0, &[2, 1], &[1, 2], &mut Vec::new(), &mut Values::default());
+}
+
 // --- Boolean operations ------------------------------------------------------
 
 #[test]

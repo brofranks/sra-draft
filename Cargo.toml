@@ -11,12 +11,27 @@ description = "Hybrid symbolic and concrete binary relations with fused, user-co
 num-bigint = "0.4.7"
 sra-macros = { path = "macros" }
 
+# The appendix runs on the main thread: its nested query types overflow the
+# default test-thread stack in debug builds.
+[[example]]
+name = "appendix"
+test = true
+harness = false
+
+[[example]]
+name = "community_update"
+test = true
+
 [[example]]
 name = "correlations"
 test = true
 
 [[example]]
 name = "custom_types"
+test = true
+
+[[example]]
+name = "fault_tolerance"
 test = true
 
 [[example]]

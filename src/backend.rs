@@ -557,6 +557,11 @@ pub trait Column: Send + Sync {
     /// Values are sorted, distinct, and in the exact logical universe, packed at a
     /// stride of `self.sort().words()` little-endian words. An empty/full set uses
     /// the corresponding constant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `values` breaks this packing contract. Every implementation
+    /// enforces it, with [`check_packed`](crate::scalar::check_packed).
     #[must_use]
     fn set(&self, values: &[u64]) -> Function;
 
@@ -673,6 +678,11 @@ pub trait Column: Send + Sync {
     /// per key, differing from `default`. Labels are appended to `slot_labels`
     /// under the same contract as [`Self::cases`]. The caller supplies working
     /// memory in `scratch`; see [`Values`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `keys` breaks this packing contract. Every implementation
+    /// enforces it, with [`check_packed`](crate::scalar::check_packed).
     #[must_use]
     fn values(
         &self,

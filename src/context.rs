@@ -25,7 +25,7 @@ use crate::ast::{AstId, AstStore, FuncDecl, NodeKind, Sort, SortKind};
 use crate::backend::{Backend, BoolOp, Column, Function, MapSpec};
 use crate::bdd::BddStore;
 use crate::index::{IndexData, dec_partition_refs};
-use crate::scalar::{self, ScalarSort};
+use crate::scalar::ScalarSort;
 use crate::sparse::SparseTable;
 use crate::util::fresh_id;
 
@@ -320,25 +320,6 @@ pub struct Context {
     pub data: Arc<ContextData>,
 }
 
-/// Checks that `values` are sorted, distinct, and encoded in `sort`.
-pub fn check_packed(sort: ScalarSort, values: &[u64]) {
-    let words = sort.words();
-    assert!(
-        values.len().is_multiple_of(words),
-        "values are not packed at the sort's word stride"
-    );
-    assert!(
-        values.chunks_exact(words).all(|v| sort.accepts(v)),
-        "value is outside the column sort"
-    );
-    assert!(
-        values
-            .chunks_exact(words)
-            .is_sorted_by(|a, b| scalar::compare(a, b).is_lt()),
-        "values are not sorted and distinct"
-    );
-}
-
 impl Context {
     /// Creates an empty context with a fresh identity.
     pub fn new() -> Self {
@@ -572,7 +553,6 @@ impl Context {
     /// unsorted, repeated, or outside the sort.
     pub fn set(&self, column: ColumnId, values: &[u64]) -> Predicate {
         let c = self.resolve(column);
-        check_packed(c.sort(), values);
         self.adopt(column, c.set(values))
     }
 

@@ -23,7 +23,7 @@ use num_bigint::BigUint;
 use crate::backend::{
     Alignment, Backend, BoolOp, Column, Function, MapSpec, Members, Refinement, StoreCache, Values,
 };
-use crate::scalar::{ScalarKind, ScalarSort};
+use crate::scalar::{ScalarKind, ScalarSort, check_packed};
 use crate::util::dag::{
     Dag, Exhausted, Grow, Map, NeedGrowth, NodeRef as DagNodeRef, Shared, structural_hash,
 };
@@ -1098,6 +1098,7 @@ impl Column for BddColumn {
     /// The predicate holding exactly where the value takes one of the sorted,
     /// distinct `values`.
     fn set(&self, values: &[u64]) -> Function {
+        check_packed(self.sort, values);
         self.store
             .owned(|state| state.try_values(self.span, 0, values, &|_| 1, 0, 0))
     }
@@ -1386,6 +1387,7 @@ impl Column for BddColumn {
         slot_labels: &mut Vec<u32>,
         _: &mut Values,
     ) -> Function {
+        check_packed(self.sort, keys);
         self.store.owned(|state| {
             let f = state.try_values(self.span, 0, keys, &|i| case_labels[i], 0, default)?;
             state.try_canonicalize(f, slot_labels)
