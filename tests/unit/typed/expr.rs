@@ -6,21 +6,18 @@
 //! bit map, that conditions are subidentities on the original input (so
 //! negation and Boolean composition preserve the concrete meaning), and that
 //! record, fixed-set, and interned views expose their own operations over the
-//! same input. `Packet` is a hand-written record, `bytes` is a small one-word
+//! same input. `Packet` is a record, `bytes` is a small one-word
 //! relation, and `rows` reads ground rows by membership alone.
 
 use std::collections::BTreeSet;
 
-use super::{Condition, Expr, Functional, Test};
-use crate::ast::{Sort, TupleDecl};
+use super::{Expr, Functional};
+use crate::Schema;
 use crate::backend::MapSpec;
 use crate::context::Context;
-use crate::query::Join;
-use crate::row::{IntoRow, RowRef, RowSink};
 use crate::run::Exec;
 use crate::typed::{
-    Dictionary, Domain, FiniteSet, FuncDecl, Interned, IntoQuery, Query, Record, Rel, Sorted,
-    Universe, View, pred,
+    Dictionary, Domain, FiniteSet, Interned, IntoQuery, Query, Rel, Sorted, Universe, pred,
 };
 
 /// Every ground row of a relation over one-word columns, by membership
@@ -44,93 +41,19 @@ fn rows(rel: &crate::rel::Rel) -> BTreeSet<Vec<u64>> {
     }
 }
 
-/// A two-field record, written by hand the way a derive would generate it.
-#[derive(Clone, Copy, Debug)]
+/// A two-field record.
+#[derive(Clone, Copy, Debug, Schema)]
 struct Packet {
     src: u8,
     dst: u8,
 }
 
-impl Sorted for Packet {
-    type Shape = <(u8, u8) as Sorted>::Shape;
-    fn sort(cx: &Context) -> Sort {
-        Self::declaration(cx).sort
-    }
-}
-
-impl Record for Packet {
-    type Args = (u8, u8);
-    fn declaration(cx: &Context) -> TupleDecl {
-        cx.tuple_decl("Packet", [("src", u8::sort(cx)), ("dst", u8::sort(cx))])
-    }
-}
-
-impl IntoRow for Packet {
-    fn record_sort(&self, cx: &Context) -> Option<Sort> {
-        Some(Packet::sort(cx))
-    }
-
-    fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
-        (self.src, self.dst).append(row, out);
-    }
-}
-
-/// The member expressions of one `Packet` input, written by hand the way a
-/// derive would generate them: every field is a function of the same closure
-/// input.
-struct PacketView<D> {
-    src: Expr<D, u8>,
-    dst: Expr<D, u8>,
-}
-
-impl<D> Clone for PacketView<D> {
-    fn clone(&self) -> Self {
-        Self {
-            src: self.src.clone(),
-            dst: self.dst.clone(),
-        }
-    }
-}
-
-impl View for Packet {
-    type Expr<D: Sorted> = PacketView<D>;
-    fn view<D: Sorted>(input: Expr<D, Self>) -> PacketView<D> {
-        PacketView {
-            src: input.field::<u8>(0),
-            dst: input.field::<u8>(1),
-        }
-    }
-}
-
-impl<D: Sorted> IntoQuery for PacketView<D> {
-    type D = D;
-    type R = Packet;
-    type Node = Join<<Expr<D, u8> as IntoQuery>::Node, <Expr<D, u8> as IntoQuery>::Node>;
-    fn into_query(self) -> Query<D, Packet, Self::Node> {
-        let q = crate::query::IntoQuery::and(self.src.into_query().raw, self.dst.into_query().raw);
-        let domain = q.domain.sort;
-        let range = Packet::sort(&q.cx);
-        Query::from_raw(q.coerce(domain, range))
-    }
-}
-
-impl<D: Sorted> Functional for PacketView<D> {}
-
-impl<D: Sorted> PacketView<D> {
-    fn test<P: pred::Predicate<Packet>>(
-        self,
-        p: P,
-    ) -> Condition<D, Test<<Self as IntoQuery>::Node>> {
-        Functional::test(self, p)
-    }
-
-    fn eq(self, value: impl IntoRow) -> Condition<D, Test<<Self as IntoQuery>::Node>> {
-        Functional::eq(self, value)
-    }
-
-    fn ne(self, value: impl IntoRow) -> Condition<D, Test<<Self as IntoQuery>::Node>> {
-        Functional::ne(self, value)
-    }
+/// A record with a zero-width member: its projection has no columns of its
+/// own.
+#[derive(Clone, Debug, Schema)]
+struct Tagged {
+    marker: (),
+    value: u8,
 }
 
 struct Flags;
@@ -143,36 +66,11 @@ impl Universe for Flags {
 }
 type FlagSet = FiniteSet<Flags>;
 
-/// A record with a set-valued member, declared without a view: its tests
-/// reach the member through the accessor declaration.
-#[derive(Clone, Debug)]
+/// A record with a set-valued member.
+#[derive(Clone, Debug, Schema)]
 struct Host {
     id: u8,
     flags: FlagSet,
-}
-
-impl Sorted for Host {
-    type Shape = <(u8, FlagSet) as Sorted>::Shape;
-    fn sort(cx: &Context) -> Sort {
-        Self::declaration(cx).sort
-    }
-}
-
-impl Record for Host {
-    type Args = (u8, FlagSet);
-    fn declaration(cx: &Context) -> TupleDecl {
-        cx.tuple_decl("Host", [("id", u8::sort(cx)), ("flags", FlagSet::sort(cx))])
-    }
-}
-
-impl IntoRow for Host {
-    fn record_sort(&self, cx: &Context) -> Option<Sort> {
-        Some(Host::sort(cx))
-    }
-
-    fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
-        (self.id, &self.flags).append(row, out);
-    }
 }
 
 struct Names;
@@ -400,6 +298,7 @@ fn conditions_form_a_boolean_algebra_over_the_closure_input() {
 fn record_views_project_fields_of_one_input() {
     let mut cx = Context::default();
     Packet::bind(&mut cx);
+    Tagged::bind(&mut cx);
     let mut packets = Rel::<Packet, Packet>::new_set(&cx);
     packets.insert_rows([
         Packet { src: 1, dst: 2 },
@@ -438,6 +337,21 @@ fn record_views_project_fields_of_one_input() {
             .count(),
         1_u32.into()
     );
+    // A zero-width member has no columns of its own; its projection starts at
+    // position zero and the record's other fields keep their offsets.
+    let mut tagged = Rel::<Tagged, Tagged>::new_set(&cx);
+    tagged.insert_rows([
+        Tagged {
+            value: 3,
+            marker: (),
+        },
+        Tagged {
+            value: 4,
+            marker: (),
+        },
+    ]);
+    assert_eq!((&tagged).filt(|t| t.value.gt(3_u8)).count(), 1_u32.into());
+    assert_eq!((&tagged).filt(|t| t.marker.eq(())).count(), 2_u32.into());
 }
 
 #[test]
@@ -659,7 +573,7 @@ fn fixed_set_expressions_update_membership_bits() {
 
     // A set-valued declaration tests one membership bit without opening a
     // closure.
-    let flags = FuncDecl::<Host, FlagSet>::from_raw(&cx, Host::declaration(&cx).accessors[1]);
+    let flags = Host::schema(&cx).flags;
     let mut hosts = Rel::<Host, Host>::new_set(&cx);
     hosts.insert_rows([
         Host {

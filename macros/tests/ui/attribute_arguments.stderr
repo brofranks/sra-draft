@@ -1,0 +1,5 @@
+error: expected one bare #[symbolic] annotation
+ --> tests/ui/attribute_arguments.rs:3:5
+  |
+3 |     #[symbolic(bdd)]
+  |     ^^^^^^^^^^^^^^^^

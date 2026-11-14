@@ -1,0 +1,5 @@
+error: expected one bare #[symbolic] annotation
+ --> tests/ui/repeated_attribute.rs:4:5
+  |
+4 |     #[symbolic]
+  |     ^^^^^^^^^^^

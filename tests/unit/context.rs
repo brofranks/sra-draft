@@ -153,14 +153,14 @@ fn members_bind_once_to_their_selected_backend() {
     assert_ne!(a, b);
     assert_eq!(cx.bind_field(t.accessors[0]), a);
     assert_eq!(cx.bind_field(t.accessors[1]), b);
-    assert_eq!(cx.field(t.accessors[0]), a);
-    assert_eq!(cx.field(t.accessors[1]), b);
+    assert_eq!(cx.field(t.accessors[0]), Some(a));
+    assert_eq!(cx.field(t.accessors[1]), Some(b));
     assert_eq!(a, cx.column(cx.backend("sparse"), BV4));
     assert_eq!(b, cx.column(cx.backend("bdd"), BV8));
     // An anonymous scalar keyed by its sort binds the sparse default.
     let sort = cx.bv_sort(4);
     assert_eq!(cx.bind_field(sort), a);
-    assert_eq!(cx.field(sort), a);
+    assert_eq!(cx.field(sort), Some(a));
 }
 
 #[test]
@@ -267,7 +267,8 @@ fn field_binding_rejects_nonleaf_declarations() {
 #[should_panic(expected = "field must be bound")]
 fn an_unbound_field_is_rejected() {
     let cx = Context::default();
-    cx.field(cx.bv_sort(4));
+    assert_eq!(cx.field(cx.bv_sort(4)), None);
+    crate::row::Domain::row(cx.bv_sort(4), &cx);
 }
 
 #[test]

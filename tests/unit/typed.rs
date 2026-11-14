@@ -2,7 +2,7 @@
 //! wraps, the Rust types only decide which runtime sorts the endpoints must
 //! have, and raw conversion checks those sorts.
 //!
-//! Fixtures are the hand-written `Edge` record, its two `u8` accessors, and
+//! Fixtures are the `Edge` record, its two `u8` accessors, and
 //! the three-pair `chain` relation over bound 8-bit endpoints.
 
 use std::collections::BTreeSet;
@@ -10,10 +10,11 @@ use std::net::Ipv4Addr;
 use std::ops::ControlFlow;
 
 use super::{Except, FuncDecl, Int, IntoQuery, Query, Record, Rel, Sorted, UInt, Variable, id};
+use crate::Schema;
 use crate::ast::{Sort, TupleDecl};
 use crate::backend::BoolOp;
 use crate::context::Context;
-use crate::row::{self, Domain, IntoRow, Row, RowRef, RowSink};
+use crate::row::{self, Domain, Row};
 
 /// A bound row of the bit-vector sort of width `w`.
 fn bv(cx: &mut Context, w: u32) -> Row {
@@ -47,47 +48,17 @@ fn pairs(rel: &crate::rel::Rel) -> BTreeSet<(u64, u64)> {
     rows(rel).into_iter().map(|r| (r[0], r[1])).collect()
 }
 
-/// A two-field record, written by hand the way a derive would generate it.
-#[derive(Clone, Copy, Debug)]
+/// A two-field record.
+#[derive(Clone, Copy, Debug, Schema)]
 struct Edge {
     from: u8,
     to: u8,
 }
 
-impl Sorted for Edge {
-    type Shape = <(u8, u8) as Sorted>::Shape;
-    // Each call re-runs the declaration. The context returns the existing
-    // declaration for an equal name and member list, so the sort is stable
-    // within one context without a per-type memo.
-    fn sort(cx: &Context) -> Sort {
-        Self::declaration(cx).sort
-    }
-}
-
-impl Record for Edge {
-    type Args = (u8, u8);
-    fn declaration(cx: &Context) -> TupleDecl {
-        cx.tuple_decl("Edge", [("from", u8::sort(cx)), ("to", u8::sort(cx))])
-    }
-}
-
-impl IntoRow for Edge {
-    fn record_sort(&self, cx: &Context) -> Option<Sort> {
-        Some(Edge::sort(cx))
-    }
-
-    fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
-        (self.from, self.to).append(row, out);
-    }
-}
-
 /// The typed `from` and `to` accessors of `Edge`.
 fn accessors(cx: &Context) -> (FuncDecl<Edge, u8>, FuncDecl<Edge, u8>) {
-    let decl = Edge::declaration(cx);
-    (
-        FuncDecl::from_raw(cx, decl.accessors[0]),
-        FuncDecl::from_raw(cx, decl.accessors[1]),
-    )
+    let EdgeSchema { from, to, .. } = Edge::schema(cx);
+    (from, to)
 }
 
 /// `{(0,1), (1,2), (2,3)}` over bound 8-bit endpoints.
@@ -423,7 +394,8 @@ fn endpoint_subidentities_keep_their_rust_interpretation() {
 fn except_compares_records_around_one_field() {
     let mut cx = Context::default();
     Edge::bind(&mut cx);
-    let (from, to) = accessors(&cx);
+    let schema = Edge::schema(&cx);
+    let EdgeSchema { from, to, .. } = schema;
     let key = Query::<Edge, _>::except(&cx, to);
     let mut a = Rel::<Edge, Edge>::new_set(&cx);
     a.insert(Edge { from: 1, to: 2 });
@@ -435,6 +407,8 @@ fn except_compares_records_around_one_field() {
     // differing kept field does not.
     assert!((&a).select(&key).values() == (&b).select(&key).values());
     assert!((&a).select(&key).values() != (&c).select(&key).values());
+    // `schema.except(cx, f)` is the same query as `Query::except(cx, f)`.
+    assert!((&a).select(&key).values() == (&b).select(schema.except(&cx, schema.to)).values());
     // Dropping the other field swaps which comparison holds.
     let other = Query::<Edge, _>::except(&cx, from);
     assert!((&a).select(&other).values() == (&c).select(&other).values());
@@ -630,14 +604,17 @@ fn nested_record_members_keep_their_nominal_boundaries() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting definition for named sort Edge")]
+#[should_panic(expected = "conflicting definition for named sort sra::typed::tests::Edge")]
 fn conflicting_record_declaration_is_rejected() {
     struct Conflict;
     impl Sorted for Conflict {
         type Shape = <(u16, u8) as Sorted>::Shape;
         fn sort(cx: &Context) -> Sort {
-            cx.tuple_decl("Edge", [("from", u16::sort(cx)), ("to", u8::sort(cx))])
-                .sort
+            cx.tuple_decl(
+                concat!(module_path!(), "::Edge"),
+                [("from", u16::sort(cx)), ("to", u8::sort(cx))],
+            )
+            .sort
         }
     }
     let cx = Context::default();

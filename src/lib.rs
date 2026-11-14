@@ -8,8 +8,12 @@
 //! [`pred`] the field predicates that restrict them, [`iteration`] the
 //! semi-naive fixed points over them, [`loader`] the SMT-LIB guard
 //! definitions evaluated into predicates, and [`typed`] the Rust endpoint
-//! interpretations over all of it.
+//! interpretations over all of it, entered through [`Schema`].
 #![warn(missing_docs)]
+
+// Generated code names this crate as `::sra`, so the crate's own tests can
+// use the derive.
+extern crate self as sra;
 
 #[macro_use]
 pub mod util;
@@ -44,3 +48,4 @@ pub use row::{Bv, IntoRow, Row};
 pub use run::Binding;
 pub use scalar::ScalarSort;
 pub use sparse::SparseTable;
+pub use sra_macros::Schema;

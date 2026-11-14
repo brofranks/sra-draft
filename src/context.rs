@@ -451,7 +451,7 @@ impl Context {
     pub fn bind_field(&mut self, field: impl Into<Field>) -> ColumnId {
         let field = field.into();
         assert!(field.context == self.id, "field belongs to another context");
-        if let Some(&column) = self.fields.get(&field.id) {
+        if let Some(column) = self.field(field) {
             return column;
         }
         let scalar = {
@@ -475,15 +475,15 @@ impl Context {
         column
     }
 
-    /// The column bound to `field`.
+    /// The column bound to `field`, if any.
     ///
     /// # Panics
     ///
-    /// Panics if `field` belongs to another context or is not bound.
-    pub fn field(&self, field: impl Into<Field>) -> ColumnId {
+    /// Panics if `field` belongs to another context.
+    pub fn field(&self, field: impl Into<Field>) -> Option<ColumnId> {
         let field = field.into();
         assert!(field.context == self.id, "field belongs to another context");
-        *self.fields.get(&field.id).expect("field must be bound")
+        self.fields.get(&field.id).copied()
     }
 
     /// The value dictionary of the symbol sort `sort`, allocated on first use

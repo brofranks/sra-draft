@@ -35,9 +35,12 @@
 //! map drops, while a negated test does not.
 //!
 //! Scalar maps currently support identity and bitwise operations against
-//! literals. Comparisons also take literals. Record views written against
-//! `View` expose field expressions through `Expr::field`. Expression-to-
-//! expression arithmetic is unsupported. General relational operands remain
+//! literals. Comparisons also take literals. `#[derive(Schema)]` provides
+//! record views whose fields are expressions of the same closure input, as in
+//! `q.filt(|r| r.src.eq(1))`, with `test`, `eq`, and `ne` on the whole record.
+//! Hand-written [`View`] implementations build the same shape from
+//! `Expr::field` and `Expr::unit`. Expression-to-expression arithmetic is
+//! unsupported. General relational operands remain
 //! available through `select`/`with`. Fixed-set expressions additionally
 //! support member tests and updates, and union/intersection with constant
 //! sets. These lower to the same bitwise maps without integer interpretation.
@@ -172,7 +175,7 @@ range_restrictions!(Range, RangeFrom, RangeInclusive, RangeTo, RangeToInclusive)
 /// A total symbolic function, built from expressions rather than arbitrary
 /// relation witnesses.
 ///
-/// Record views implement this contract by
+/// Generated and hand-written record views implement this contract by
 /// pairing fields of the same closure input.
 pub trait Functional: IntoQuery {
     /// Tests this expression's value while retaining the closure's original
@@ -221,9 +224,7 @@ macro_rules! functional_tuples {
                 let ($av, $($bv,)*) = self;
                 let q = $av.into_query().raw;
                 $(let q = RawIntoQuery::and(q, $bv.into_query().raw);)*
-                let domain = q.domain.sort;
-                let range = Self::R::sort(&q.cx);
-                Query::from_raw(q.coerce(domain, range))
+                Query::coerced(q)
             }
         }
         impl<$a: Functional, $($b: Functional<D = $a::D>),*> Functional for ($a, $($b,)*)
@@ -306,7 +307,8 @@ impl<D: Sorted, R: Sorted> Expr<D, R> {
     /// Projects one declared field without binding another witness of the
     /// closure input.
     ///
-    /// This low-level constructor serves [`View`] implementations. Like other
+    /// This low-level constructor serves generated and hand-written [`View`]
+    /// implementations. Like other
     /// raw conversions, it checks runtime sorts only, so the caller supplies
     /// the field's declared interpretation as `T`.
     ///
@@ -321,12 +323,17 @@ impl<D: Sorted, R: Sorted> Expr<D, R> {
             "fields require a structural record expression"
         );
         let cx = &self.source.raw.cx;
-        let part = row::children(cx, &self.source.raw.range)
-            .nth(i)
+        let range = &self.source.raw.range;
+        let sort = *range
+            .members
+            .get(i)
             .expect("field index must name a declared field");
-        let k = self.source.raw.domain.sort.len + part.start - self.source.raw.range.start;
+        assert_eq!(sort, T::sort(cx), "typed query range mismatch");
+        let offset: usize = range.members[..i].iter().map(|s| s.len).sum();
+        let part = row::Row::new(cx, sort, range.layout.clone(), range.start + offset);
+        let k = self.source.raw.domain.sort.len + offset;
         T::view(Expr {
-            source: Query::from_raw(query::project(
+            source: Query::wrap(query::project(
                 cx,
                 &self.source.raw.domain,
                 self.source.raw.ends[k..k + part.sort.len].iter().copied(),

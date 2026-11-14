@@ -1,0 +1,5 @@
+error: Schema requires a nongeneric struct
+ --> tests/ui/generic_struct.rs:2:8
+  |
+2 | struct Pair<T> {
+  |        ^^^^

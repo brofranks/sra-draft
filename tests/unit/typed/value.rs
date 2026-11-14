@@ -5,10 +5,9 @@
 use std::net::Ipv4Addr;
 
 use super::{Int, UInt};
-use crate::ast::{Sort, TupleDecl};
+use crate::Schema;
 use crate::context::Context;
-use crate::row::{IntoRow, RowRef, RowSink};
-use crate::typed::{FuncDecl, IntoQuery, Record, Rel, Sorted};
+use crate::typed::{IntoQuery, Rel, Sorted};
 
 // --- construction and order ---------------------------------------------
 
@@ -62,57 +61,26 @@ fn signed_values_need_a_sign_bit_is_rejected() {
 
 // --- rows ---------------------------------------------------------------
 
-/// A record mixing an address and custom-width integers, written by hand
-/// the way a derive would generate it.
-#[derive(Clone, Debug)]
+/// A record with two symbolic members and one sparse member.
+#[derive(Clone, Debug, Schema)]
 struct Hop {
+    #[symbolic]
     address: Ipv4Addr,
+    #[symbolic]
     ttl: UInt<8>,
     delta: Int<8>,
-}
-
-impl Sorted for Hop {
-    type Shape = <(Ipv4Addr, UInt<8>, Int<8>) as Sorted>::Shape;
-    fn sort(cx: &Context) -> Sort {
-        Self::declaration(cx).sort
-    }
-}
-
-impl Record for Hop {
-    type Args = (Ipv4Addr, UInt<8>, Int<8>);
-    fn declaration(cx: &Context) -> TupleDecl {
-        cx.tuple_decl(
-            "Hop",
-            [
-                ("address", Ipv4Addr::sort(cx)),
-                ("ttl", UInt::<8>::sort(cx)),
-                ("delta", Int::<8>::sort(cx)),
-            ],
-        )
-    }
-}
-
-impl IntoRow for Hop {
-    fn record_sort(&self, cx: &Context) -> Option<Sort> {
-        Some(Hop::sort(cx))
-    }
-
-    fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
-        (self.address, &self.ttl, &self.delta).append(row, out);
-    }
 }
 
 #[test]
 fn custom_integers_pack_into_rows() {
     let mut cx = Context::default();
-    let decl = Hop::declaration(&cx);
-    let bdd = cx.backend("bdd");
-    cx.set_representation(decl.accessors[0], bdd);
-    cx.set_representation(decl.accessors[1], bdd);
     Hop::bind(&mut cx);
-    let address = FuncDecl::<Hop, Ipv4Addr>::from_raw(&cx, decl.accessors[0]);
-    let ttl = FuncDecl::<Hop, UInt<8>>::from_raw(&cx, decl.accessors[1]);
-    let delta = FuncDecl::<Hop, Int<8>>::from_raw(&cx, decl.accessors[2]);
+    let HopSchema {
+        address,
+        ttl,
+        delta,
+        ..
+    } = Hop::schema(&cx);
     let mut hops = Rel::<Hop, Hop>::new_set(&cx);
     hops.insert(Hop {
         address: Ipv4Addr::new(10, 0, 0, 1),
@@ -146,9 +114,8 @@ fn custom_integers_pack_into_rows() {
 #[test]
 fn signed_columns_order_negative_values_first() {
     let mut cx = Context::default();
-    let decl = Hop::declaration(&cx);
     Hop::bind(&mut cx);
-    let delta = FuncDecl::<Hop, Int<8>>::from_raw(&cx, decl.accessors[2]);
+    let HopSchema { delta, .. } = Hop::schema(&cx);
     let mut hops = Rel::<Hop, Hop>::new_set(&cx);
     for value in [-128, -1, 0, 127] {
         hops.insert(Hop {

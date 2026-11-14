@@ -1,0 +1,11 @@
+error: Schema requires a struct with named fields
+ --> tests/ui/unnamed_fields.rs:2:8
+  |
+2 | struct Positional(u8);
+  |        ^^^^^^^^^^
+
+error: Schema requires a struct with named fields
+ --> tests/ui/unnamed_fields.rs:5:8
+  |
+5 | struct Empty;
+  |        ^^^^^

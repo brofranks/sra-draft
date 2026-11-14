@@ -1,0 +1,5 @@
+error: Schema requires a struct with named fields
+ --> tests/ui/not_a_struct.rs:2:6
+  |
+2 | enum Choice {
+  |      ^^^^^^

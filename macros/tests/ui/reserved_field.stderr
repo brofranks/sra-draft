@@ -1,0 +1,11 @@
+error: field name reserved by Schema
+ --> tests/ui/reserved_field.rs:3:5
+  |
+3 |     sort: u8,
+  |     ^^^^
+
+error: field name reserved by Schema
+ --> tests/ui/reserved_field.rs:8:5
+  |
+8 |     r#constructor: u8,
+  |     ^^^^^^^^^^^^^

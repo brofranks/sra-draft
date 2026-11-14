@@ -10,9 +10,8 @@
 use std::collections::BTreeSet;
 
 use super::{self as pred};
-use crate::ast::{Sort, TupleDecl};
+use crate::Schema;
 use crate::context::Context;
-use crate::row::{IntoRow, RowRef, RowSink};
 use crate::run::Exec;
 use crate::typed::{FuncDecl, IntoQuery, Query, Record, Rel, Sorted};
 
@@ -37,36 +36,11 @@ fn rows(rel: &crate::rel::Rel) -> BTreeSet<Vec<u64>> {
     }
 }
 
-/// A record with one unsigned and one signed member, written by hand the way
-/// a derive would generate it.
-#[derive(Clone, Copy, Debug)]
+/// A record with one unsigned and one signed member.
+#[derive(Clone, Copy, Debug, Schema)]
 struct Edge {
     from: u8,
     to: i8,
-}
-
-impl Sorted for Edge {
-    type Shape = <(u8, i8) as Sorted>::Shape;
-    fn sort(cx: &Context) -> Sort {
-        Self::declaration(cx).sort
-    }
-}
-
-impl Record for Edge {
-    type Args = (u8, i8);
-    fn declaration(cx: &Context) -> TupleDecl {
-        cx.tuple_decl("Edge", [("from", u8::sort(cx)), ("to", i8::sort(cx))])
-    }
-}
-
-impl IntoRow for Edge {
-    fn record_sort(&self, cx: &Context) -> Option<Sort> {
-        Some(Edge::sort(cx))
-    }
-
-    fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
-        (self.from, self.to).append(row, out);
-    }
 }
 
 /// `{(0,0), ..., (7,7)}` over a bound 8-bit endpoint; a restriction of the
@@ -301,9 +275,7 @@ fn exhausted_inclusive_ranges_use_the_reported_bounds() {
 fn projections_carry_typed_tests_to_their_declared_member() {
     let mut cx = Context::default();
     Edge::bind(&mut cx);
-    let decl = Edge::declaration(&cx);
-    let from = FuncDecl::<Edge, u8>::from_raw(&cx, decl.accessors[0]);
-    let to = FuncDecl::<Edge, i8>::from_raw(&cx, decl.accessors[1]);
+    let EdgeSchema { from, to, .. } = Edge::schema(&cx);
     let mut edges = Rel::<Edge, Edge>::new_set(&cx);
     edges.insert_rows([
         Edge { from: 1, to: -2 },
@@ -377,5 +349,11 @@ fn projections_carry_typed_tests_to_their_declared_member() {
     assert_eq!(
         admitted((&edges).with(from.test(pred::eq(1_u8) | ..)).collect()),
         3_u32.into()
+    );
+
+    // A derived view member tests the same record member inside filt.
+    assert_eq!(
+        admitted((&edges).filt(|e| e.from.eq(4_u8)).collect()),
+        1_u32.into()
     );
 }

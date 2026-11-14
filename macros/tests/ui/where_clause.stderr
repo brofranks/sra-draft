@@ -1,0 +1,5 @@
+error: Schema requires a nongeneric struct
+ --> tests/ui/where_clause.rs:2:8
+  |
+2 | struct Bounded
+  |        ^^^^^^^

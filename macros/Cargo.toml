@@ -1,0 +1,17 @@
+[package]
+name = "sra-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Procedural macros for sra: the Schema derive"
+license = "MIT OR Apache-2.0"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1"
+syn = { version = "2", features = ["fold", "full"] }
+
+[dev-dependencies]
+sra = { path = ".." }
+trybuild = "1"

@@ -678,6 +678,37 @@ impl Context {
             accessors,
         }
     }
+
+    /// The tuple sort already declared with exactly this name and member list.
+    ///
+    /// This lookup builds no declaration, so per-row record paths can avoid
+    /// repeating [`Context::tuple_decl`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if a member sort belongs to another context.
+    pub fn tuple_sort(&self, name: &str, members: &[(&str, Sort)]) -> Option<Sort> {
+        for (_, sort) in members {
+            assert_eq!(sort.context, self.id, "sort belongs to another context");
+        }
+        let id = *self.ast.named.lock().unwrap().get(name)?;
+        let state = self.ast.shared.read(());
+        let node = state.node(id);
+        let info = node.named.as_ref()?;
+        let same = node.kind == NodeKind::Sort(SortKind::Tuple)
+            && info.members.len() == members.len()
+            && node.edges.len() == members.len()
+            && members
+                .iter()
+                .enumerate()
+                .all(|(i, &(label, sort))| *info.members[i] == *label && node.edges[i] == sort.id);
+        same.then_some(Sort {
+            context: self.id,
+            id,
+            kind: SortKind::Tuple,
+            len: node.len,
+        })
+    }
 }
 
 #[cfg(test)]

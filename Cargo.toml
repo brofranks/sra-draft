@@ -9,6 +9,7 @@ description = "Hybrid symbolic and concrete binary relations with fused, user-co
 
 [dependencies]
 num-bigint = "0.4.7"
+sra-macros = { path = "macros" }
 
 [lints.clippy]
 # Fused combinator types are long by construction, and naming the parts hides

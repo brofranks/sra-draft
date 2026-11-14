@@ -195,7 +195,7 @@ fn row(cx: &Context, sort: Sort, field: Field) -> Row {
         sort,
         layout: leaves(cx, sort, field)
             .into_iter()
-            .map(|leaf| cx.field(leaf))
+            .map(|leaf| cx.field(leaf).expect("field must be bound"))
             .collect(),
         start: 0,
         members: members(cx, sort).into(),
