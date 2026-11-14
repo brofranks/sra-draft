@@ -16,7 +16,23 @@ name = "correlations"
 test = true
 
 [[example]]
+name = "custom_types"
+test = true
+
+[[example]]
+name = "iteration"
+test = true
+
+[[example]]
+name = "packet_reachability"
+test = true
+
+[[example]]
 name = "smt2"
+test = true
+
+[[example]]
+name = "symbols"
 test = true
 
 [lints.clippy]
