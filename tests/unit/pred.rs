@@ -6,6 +6,7 @@
 //! against the engine's own encoding.
 
 use std::collections::BTreeSet;
+use std::ops::RangeInclusive;
 
 use super::{self as pred, Build, Filter};
 use crate::context::Context;
@@ -199,6 +200,7 @@ fn ranges_lower_to_unsigned_comparisons() {
     let mut cx = Context::default();
     let four = bv(&mut cx, 4);
     let eight = bv(&mut cx, 8);
+    let three = bv(&mut cx, 3);
     let s = set(&cx, &four, 0..16);
     assert_eq!(kept(&s, 3_u8..7), expect(|x| (3..7).contains(&x)));
     assert_eq!(kept(&s, 3_u8..), expect(|x| x >= 3));
@@ -230,6 +232,35 @@ fn ranges_lower_to_unsigned_comparisons() {
     let mut r = 0_u8..=3;
     while r.next_back().is_some() {}
     assert!(r.is_empty() && all.with(r).is_empty());
+    // Exhausting a range that ends at a narrower field's maximum can leave a
+    // start outside the field.
+    let all = set(&cx, &three, 0..8);
+    let mut r = 6_u64..=7;
+    while r.next().is_some() {}
+    assert!(r.is_empty() && all.with(r).is_empty());
+    assert_eq!(all.with(6_u64..=7).count(), 2_u32.into());
+    // A signed range drained to its zero crossing keeps nothing, although its
+    // bounds encode as the whole field.
+    let mut r = -4_i8..=-1;
+    while r.next().is_some() {}
+    assert!(r.is_empty() && all.with(r).is_empty());
+    // Literal and borrowed bounds in those states keep nothing the same way.
+    assert!(all.with(RangeInclusive::new(8_u64, 7)).is_empty());
+    assert!(all.with(RangeInclusive::new(&8_u64, &7)).is_empty());
+    assert!(all.with(RangeInclusive::new(1_i8, -1)).is_empty());
+    assert!(all.with(RangeInclusive::new(&1_i8, &-1)).is_empty());
+    assert_eq!(all.with(&2_u64..=&3).count(), 2_u32.into());
+}
+
+#[test]
+fn inclusive_word_ranges_follow_the_fields_unsigned_order() {
+    let mut cx = Context::default();
+    let wide = bv(&mut cx, 128);
+    let mut s = Rel::new_set(&cx, wide);
+    s.insert_rows([[7_u64, 0], [0, 1], [9, 0], [1, 1]]);
+    // Little-endian words: 5 ..= 2^64 keeps 7, 9, and 2^64, while the array's
+    // own order would call this range empty.
+    assert_eq!(s.with([5_u64, 0]..=[0_u64, 1]).count(), 3_u32.into());
 }
 
 #[test]

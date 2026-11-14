@@ -351,6 +351,16 @@ pub trait IntoRow {
         }
     }
 
+    /// Whether the inclusive range from `start` to `end` holds no values in
+    /// this type's iteration order.
+    ///
+    /// Only iterable types and references to them override this. Exhausted
+    /// ranges carry bounds that the field's unsigned order misreads, and every
+    /// other type's bounds mean what their encodings compare to.
+    fn passed(_start: &Self, _end: &Self) -> bool {
+        false
+    }
+
     /// Appends this value's encoding for `row` to `out`.
     fn append(&self, row: RowRef<'_>, out: &mut impl RowSink);
 }
@@ -598,12 +608,20 @@ pub fn integer(value: u128, negative: bool, sort: ScalarSort, out: &mut Vec<u64>
 macro_rules! integers {
     (unsigned: $($u:ty),*; signed: $($i:ty),*) => {
         $(impl IntoRow for $u {
+            fn passed(start: &Self, end: &Self) -> bool {
+                start > end
+            }
+
             #[inline(always)]
             fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
                 integer(*self as u128, false, row.sort.scalar(), out.words());
             }
         })*
         $(impl IntoRow for $i {
+            fn passed(start: &Self, end: &Self) -> bool {
+                start > end
+            }
+
             #[inline(always)]
             fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
                 integer(*self as i128 as u128, *self < 0, row.sort.scalar(), out.words());
@@ -625,6 +643,10 @@ impl<T: IntoRow + ?Sized> IntoRow for &T {
 
     fn span(&self, cx: &Context, sorts: &[Sort]) -> Option<usize> {
         (**self).span(cx, sorts)
+    }
+
+    fn passed(start: &Self, end: &Self) -> bool {
+        T::passed(*start, *end)
     }
 
     fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {

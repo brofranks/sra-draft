@@ -27,6 +27,10 @@ impl View for Ipv4Addr {
     }
 }
 impl IntoRow for Ipv4Addr {
+    fn passed(start: &Self, end: &Self) -> bool {
+        start > end
+    }
+
     #[inline(always)]
     fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
         assert_eq!(

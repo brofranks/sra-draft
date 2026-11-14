@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use crate::backend::{BoolOp, Function, MapSpec, Refinement};
 use crate::context::{ColumnId, Context, Predicate};
-use crate::index::{IndexRoot, Level};
+use crate::index::{BalancedUnion, IndexRoot, Level};
 use crate::partition::{self, Partition};
 use crate::util::dag::{Idx, Map, Set, structural_hash};
 
@@ -856,33 +856,7 @@ pub struct Sum {
     level: usize,
     /// Pairwise union of the remaining branches, a binary counter of powers
     /// of two.
-    rest: Vec<Option<IndexRoot>>,
-}
-
-impl Sum {
-    /// Adds an unclassified branch to the balanced union.
-    #[inline(always)]
-    fn push_rest(&mut self, output: &IndexRoot, mut value: IndexRoot) {
-        for slot in &mut self.rest {
-            match slot.take() {
-                Some(left) => value = output.apply_bool(BoolOp::Or, left.function, value.function),
-                None => {
-                    *slot = Some(value);
-                    return;
-                }
-            }
-        }
-        self.rest.push(Some(value));
-    }
-
-    /// Unions unclassified branches with `out` and empties their buffer.
-    #[inline(always)]
-    fn finish_rest(&mut self, output: &IndexRoot, mut out: IndexRoot) -> IndexRoot {
-        for value in self.rest.drain(..).rev().flatten() {
-            out = output.apply_bool(BoolOp::Or, out.function, value.function);
-        }
-        out
-    }
+    rest: BalancedUnion,
 }
 
 /// Boolean multiplication handles authored field reordering.
@@ -1018,9 +992,9 @@ impl Collect {
                             &branch,
                         );
                     }
-                    diagonal.push_rest(&self.output, branch);
+                    diagonal.rest.push(&self.output, branch);
                 }
-                diagonal.finish_rest(&self.output, self.output.clone())
+                diagonal.rest.finish(&self.output, self.output.clone())
             }
         }
     }
@@ -1051,7 +1025,7 @@ impl Mode for Collect {
             sum.held.push((value, child));
             return;
         }
-        sum.push_rest(&self.output, value);
+        sum.rest.push(&self.output, value);
     }
     #[inline(always)]
     fn finish_sum(&mut self, mut sum: Self::Sum) -> IndexRoot {
@@ -1096,7 +1070,7 @@ impl Mode for Collect {
                 out
             }
         };
-        let out = sum.finish_rest(&self.output, out);
+        let out = sum.rest.finish(&self.output, out);
         self.sums.push(sum);
         out
     }

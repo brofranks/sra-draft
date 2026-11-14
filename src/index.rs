@@ -1268,6 +1268,41 @@ impl Drop for IndexRoot {
     }
 }
 
+/// A balanced union of branches of one index, a binary counter of powers of
+/// two.
+///
+/// Each slot holds the union of `2^i` branches, so `k` branches of similar
+/// size cost `O(log k)` rounds of pairwise unions instead of a growing
+/// accumulator.
+#[derive(Default)]
+pub struct BalancedUnion(Vec<Option<IndexRoot>>);
+
+impl BalancedUnion {
+    /// Adds a branch to the balanced union.
+    #[inline(always)]
+    pub fn push(&mut self, index: &IndexRoot, mut value: IndexRoot) {
+        for slot in &mut self.0 {
+            match slot.take() {
+                Some(left) => value = index.apply_bool(BoolOp::Or, left.function, value.function),
+                None => {
+                    *slot = Some(value);
+                    return;
+                }
+            }
+        }
+        self.0.push(Some(value));
+    }
+
+    /// Unions the pending branches with `out` and empties the buffer.
+    #[inline(always)]
+    pub fn finish(&mut self, index: &IndexRoot, mut out: IndexRoot) -> IndexRoot {
+        for value in self.0.drain(..).rev().flatten() {
+            out = index.apply_bool(BoolOp::Or, out.function, value.function);
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 #[path = "../tests/unit/index.rs"]
 mod tests;

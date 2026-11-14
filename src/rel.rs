@@ -8,7 +8,7 @@ use num_bigint::BigUint;
 
 use crate::backend::{BoolOp, Function};
 use crate::context::{Context, Predicate};
-use crate::index::{self, IndexRoot, Labels, Level};
+use crate::index::{self, BalancedUnion, IndexRoot, Labels, Level};
 use crate::row::{self, Domain, IntoRow, Row, RowSink};
 use crate::scalar::compare;
 use crate::util::dag::Idx;
@@ -347,12 +347,13 @@ impl Rel {
         ///
         /// The recursion descends a column per level and never re-enters a
         /// level while its keys and children are in use, so a level owns one
-        /// pair of vectors for the whole load instead of allocating them per
+        /// set of buffers for the whole load instead of allocating them per
         /// interned node.
         #[derive(Default)]
         struct Frame {
             keys: Vec<u64>,
             children: Vec<IndexRoot>,
+            branches: BalancedUnion,
         }
 
         /// Working memory shared by every column.
@@ -391,7 +392,6 @@ impl Rel {
                 .expect("frames must cover every column");
             frame.keys.clear();
             frame.children.clear();
-            let mut root = index.inc_ref(Function::FALSE);
             for run in offsets.chunk_by(|&a, &b| batch.compare(a, b, c).is_eq()) {
                 let p = batch.predicate_at(run[0] + c.start);
                 if p.is_some_and(|q| q.function().is_f()) {
@@ -408,11 +408,7 @@ impl Rel {
                         p.column(),
                         &[(p.function(), child.function)],
                     );
-                    root = if root.function.is_f() {
-                        branch
-                    } else {
-                        root.apply_bool(BoolOp::Or, root.function, branch.function)
-                    };
+                    frame.branches.push(index, branch);
                 } else {
                     frame
                         .keys
@@ -420,6 +416,7 @@ impl Rel {
                     frame.children.push(child);
                 }
             }
+            let root = frame.branches.finish(index, index.inc_ref(Function::FALSE));
             if frame.keys.is_empty() {
                 return root;
             }

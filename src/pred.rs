@@ -566,37 +566,52 @@ macro_rules! ranges {
                 ($p).build(input, index, positions)
             }
         }
-        impl<T: IntoRow> Membership for $t<T> {
+        range_operands!([T: IntoRow] $t<T>);
+    )*};
+}
+macro_rules! range_operands {
+    ([$($generic:tt)*] $t:ty) => {
+        impl<$($generic)*> Membership for $t {
             type Node = Self;
             fn into_membership(self) -> Self { self }
         }
-        impl<T: IntoRow> Operand for $t<T> {
+        impl<$($generic)*> Operand for $t {
             type Node = IndexRoot;
             #[inline(always)]
             fn resolve(self, cx: &Context, input: &Row) -> Query<Self::Node> {
                 Filter(self).resolve(cx, input)
             }
         }
-        impl<T: IntoRow> Operand for &$t<T> {
+        impl<$($generic)*> Operand for &$t {
             type Node = IndexRoot;
             #[inline(always)]
             fn resolve(self, cx: &Context, input: &Row) -> Query<Self::Node> {
                 Filter(self).resolve(cx, input)
             }
         }
-    )*};
+    };
 }
 ranges!(
     Range, |r| bvuge(&r.start) & bvult(&r.end);
     RangeFrom, |r| bvuge(&r.start);
-    // An iterated range can report an excluded end bound. Exhaustion leaves
-    // `start()` and `end()` unspecified, so the strict comparison takes its
-    // value from that bound. Every other inclusive range keeps its end.
-    RangeInclusive, |r| bvuge(r.start())
-        & match r.end_bound() { Bound::Excluded(e) => bvult(e), _ => bvule(r.end()) };
     RangeTo, |r| bvult(&r.end);
     RangeToInclusive, |r| bvule(&r.end);
 );
+// Exhaustion leaves `start()` and `end()` unspecified, possibly one past the
+// field's maximum or wrapped past zero, so a passed range encodes neither
+// bound. A literal range in that state keeps nothing too. An exhausted range
+// can instead report an excluded end, which keeps nothing as well.
+impl<T: IntoRow> Build for RangeInclusive<T> {
+    fn build(&self, input: &Row, index: &IndexRoot, positions: &[usize]) -> IndexRoot {
+        if T::passed(self.start(), self.end()) || matches!(self.end_bound(), Bound::Excluded(_)) {
+            check(input, index, positions);
+            row::bitvector_column(input);
+            return index.inc_ref(Function::FALSE);
+        }
+        (bvuge(self.start()) & bvule(self.end())).build(input, index, positions)
+    }
+}
+range_operands!([T: IntoRow] RangeInclusive<T>);
 impl Build for RangeFull {
     fn build(&self, input: &Row, index: &IndexRoot, positions: &[usize]) -> IndexRoot {
         check(input, index, positions);
@@ -604,26 +619,7 @@ impl Build for RangeFull {
         index.inc_ref(Function::TRUE)
     }
 }
-impl Membership for RangeFull {
-    type Node = Self;
-    fn into_membership(self) -> Self {
-        self
-    }
-}
-impl Operand for RangeFull {
-    type Node = IndexRoot;
-    #[inline(always)]
-    fn resolve(self, cx: &Context, input: &Row) -> Query<Self::Node> {
-        Filter(self).resolve(cx, input)
-    }
-}
-impl Operand for &RangeFull {
-    type Node = IndexRoot;
-    #[inline(always)]
-    fn resolve(self, cx: &Context, input: &Row) -> Query<Self::Node> {
-        Filter(self).resolve(cx, input)
-    }
-}
+range_operands!([] RangeFull);
 
 /// A source-free structural map from a complete nominal domain onto the row
 /// positions a predicate tests, resolved in the index's context.
