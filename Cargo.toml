@@ -11,6 +11,14 @@ description = "Hybrid symbolic and concrete binary relations with fused, user-co
 num-bigint = "0.4.7"
 sra-macros = { path = "macros" }
 
+[[example]]
+name = "correlations"
+test = true
+
+[[example]]
+name = "smt2"
+test = true
+
 [lints.clippy]
 # Fused combinator types are long by construction, and naming the parts hides
 # the structure that monomorphization depends on.

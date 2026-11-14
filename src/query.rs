@@ -638,7 +638,7 @@ impl<T: IntoQuery> Operand for T {
     }
 }
 
-/// A declaration is a source-free projection of its own bound domain row,
+/// A declaration is a source-free projection of its bound declared row,
 /// closed over the consuming query's context; see [`Query::decl`].
 impl Operand for FuncDecl {
     type Node = ();
@@ -1485,10 +1485,11 @@ impl Query<()> {
         project(cx, &row, 0..row.sort.len, row.clone())
     }
 
-    /// A declaration as a source-free projection of its own bound domain row.
+    /// A declaration as a source-free projection of its bound declared row.
     ///
-    /// A member selects that component's columns; a constructor keeps every
-    /// column under a different nominal output sort.
+    /// A member selects that component's columns from its domain row; a
+    /// constructor keeps every column of its record row, read under the
+    /// argument product and written under the record sort.
     ///
     /// # Panics
     ///
@@ -1496,14 +1497,19 @@ impl Query<()> {
     /// leaf is unbound.
     pub fn decl(cx: &Context, decl: FuncDecl) -> Self {
         let info = decl.resolve(cx);
-        let input = info.domain.row(cx);
         match info.member {
             Some(i) => {
+                let input = info.domain.row(cx);
                 let part = row::children(cx, &input).nth(i).unwrap();
                 let start = part.start - input.start;
                 project(cx, &input, start..start + part.sort.len, part)
             }
-            None => project(cx, &input, 0..input.sort.len, info.range.row(cx)),
+            None => {
+                let range = info.range.row(cx);
+                let mut input = range.clone();
+                row::coerce(cx, &mut input, info.domain);
+                project(cx, &input, 0..input.sort.len, range)
+            }
         }
     }
 

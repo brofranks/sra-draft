@@ -1,9 +1,13 @@
-//! End-to-end scenarios, re-authored from the crate's examples as tests.
+//! End-to-end scenarios, re-authored from the crate's examples as tests or
+//! including an example directly.
 //!
 //! These sweep the whole stack - typed frontend, combinators, field
 //! predicates, the outer index, the CPS executor, and both backends - in a
 //! handful of tests, so the module-level tests can stay focused on the
 //! branches these leave uncovered.
+
+#[path = "../examples/concurrency.rs"]
+mod concurrency_example;
 
 // --- iteration ----
 // Semi-naive iteration: reachability through a cycle with a guarded bit
@@ -420,62 +424,12 @@ mod custom_types {
 // API).
 
 mod raw {
-    use std::iter;
     use std::ops::ControlFlow;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
 
-    use sra::{BoolOp, Context, IntoQuery, Operand, Rel};
+    use sra::{BoolOp, Context, IntoQuery, Rel};
 
-    /// Composes stored relations using caller-chosen source ranges and scoped
-    /// workers.
-    ///
-    /// The source domain must be a scalar bitvector of at most 64
-    /// bits. Each task keeps the original endpoint universes; native union
-    /// checks compatible result indexes.
-    fn collect_partitioned(a: &Rel, b: &Rel, chunks: usize, workers: usize) -> Rel {
-        let width = a
-            .domain
-            .sort
-            .scalar()
-            .bit_width()
-            .expect("source domain must be a bitvector");
-        let n = 1_u128 << width;
-        let chunks = (chunks as u128).min(n) as usize;
-        let next = AtomicUsize::new(0);
-        let cx = a.root.context();
-        thread::scope(|scope| {
-            let handles: Vec<_> = (0..workers)
-                .map(|_| {
-                    scope.spawn(|| {
-                        iter::from_fn(|| {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            (i < chunks).then_some(i)
-                        })
-                        .map(|i| {
-                            // Inclusive bounds cover even the full 64-bit
-                            // universe without overflow.
-                            let lo = (n * i as u128 / chunks as u128) as u64;
-                            let hi = (n * (i as u128 + 1) / chunks as u128 - 1) as u64;
-                            // Apply the source restriction before traversal;
-                            // do not collect input shards.
-                            (lo..=hi)
-                                .resolve(cx, &a.domain)
-                                .select(a)
-                                .select(b)
-                                .collect()
-                        })
-                        .reduce(|left, right| left.apply_bool(BoolOp::Or, &right))
-                    })
-                })
-                .collect();
-            handles
-                .into_iter()
-                .filter_map(|h| h.join().unwrap())
-                .reduce(|left, right| left.apply_bool(BoolOp::Or, &right))
-                .unwrap()
-        })
-    }
+    use crate::concurrency_example::collect_partitioned;
 
     #[test]
     fn concurrency_shares_queries_across_scoped_workers() {

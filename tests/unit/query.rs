@@ -330,6 +330,20 @@ fn declarations_project_and_construct_records() {
 }
 
 #[test]
+fn constructor_shares_the_record_columns_without_an_anonymous_binding() {
+    let mut cx = Context::default();
+    let three = cx.bv_sort(3);
+    let t = cx.tuple_decl("T", [("x", three), ("y", three)]);
+    let backend = cx.backend("bdd");
+    cx.set_representation(t.accessors[0], backend);
+    cx.set_representation(t.accessors[1], backend);
+    let trow = t.sort.bind(&mut cx);
+    let c = Query::decl(&cx, t.constructor);
+    assert_eq!(row::columns(&c.range), row::columns(&trow));
+    assert_eq!(row::columns(&c.domain), row::columns(&trow));
+}
+
+#[test]
 fn except_projects_a_record_onto_its_other_members() {
     let mut cx = Context::default();
     let two = bv(&mut cx, 2);
