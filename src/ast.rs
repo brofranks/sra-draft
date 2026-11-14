@@ -3,9 +3,10 @@
 //! Structural sort dependencies are traced edges. Query operators and source
 //! ownership live in ordinary Rust values, outside this declaration store.
 //!
-//! A sort describes meaning, not a physical store. A scalar sort or a declared
-//! record member is bound to a backend separately, through
-//! [`Context::bind`] and [`Context::set_representation`].
+//! A sort describes meaning, not a physical store. The scalar leaves of a
+//! sort are bound to backends separately, through
+//! [`Context::set_representation`] and
+//! [`Domain::bind`](crate::row::Domain::bind).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -349,31 +350,6 @@ pub struct TupleDecl {
     pub constructor: FuncDecl,
     /// One accessor per member, in declaration order.
     pub accessors: Vec<FuncDecl>,
-}
-
-/// A logical sort or a declaration's range, bound to physical storage by
-/// [`Context::bind`].
-///
-/// An accessor of a record member supplies that member's configured storage,
-/// and a sort uses sparse storage.
-pub trait Domain: Copy {
-    /// The sort to bind and, for a record member, the accessor keying its
-    /// representation.
-    fn key(self, cx: &Context) -> (Sort, Option<AstId>);
-}
-
-impl Domain for Sort {
-    fn key(self, _: &Context) -> (Sort, Option<AstId>) {
-        (self, None)
-    }
-}
-
-impl Domain for FuncDecl {
-    fn key(self, cx: &Context) -> (Sort, Option<AstId>) {
-        let info = self.resolve(cx);
-        let keyed = info.member.is_some() && info.domain.kind == SortKind::Tuple;
-        (info.range, keyed.then_some(self.id))
-    }
 }
 
 impl Context {

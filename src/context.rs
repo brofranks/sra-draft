@@ -7,8 +7,8 @@
 //! that checked constructors and operations validate. The context interns one
 //! column per backend and scalar sort, so compatible operands share its ID.
 //! The context also owns the logical declarations of its sorts and records
-//! and binds each declared scalar member to one column, so logical identity,
-//! physical identity, and query occurrences remain distinct.
+//! and binds each scalar leaf of a declared sort to one column, so logical
+//! identity, physical identity, and query occurrences remain distinct.
 
 use std::any::Any;
 use std::borrow::Borrow;
@@ -19,7 +19,7 @@ use std::ops::Deref;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
-use crate::ast::{AstId, AstStore, Domain, FuncDecl, Sort, SortKind};
+use crate::ast::{AstId, AstStore, FuncDecl, NodeKind, Sort, SortKind};
 use crate::backend::{Backend, BoolOp, Column, Function};
 use crate::bdd::BddStore;
 use crate::scalar::{self, ScalarSort};
@@ -45,6 +45,34 @@ pub struct ColumnId {
     pub context: u64,
     /// The column's declaration slot.
     pub slot: usize,
+}
+
+/// A field: the binding key of a scalar leaf, which is the accessor of a
+/// record member or the sort of an anonymous scalar.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Field {
+    /// The owning context's identity.
+    pub context: u64,
+    /// The accessor or sort declaration.
+    pub id: AstId,
+}
+
+impl From<Sort> for Field {
+    fn from(sort: Sort) -> Field {
+        Field {
+            context: sort.context,
+            id: sort.id,
+        }
+    }
+}
+
+impl From<FuncDecl> for Field {
+    fn from(decl: FuncDecl) -> Field {
+        Field {
+            context: decl.context,
+            id: decl.id,
+        }
+    }
 }
 
 /// The two-way mapping behind an [`Interner`].
@@ -108,7 +136,7 @@ pub struct ContextData {
     pub id: u64,
     /// The logical declarations of this context.
     pub ast: AstStore,
-    /// The bound column of each declared record member, keyed by accessor.
+    /// The bound column of each field, keyed by its declaration.
     fields: HashMap<AstId, ColumnId>,
     /// The lazily allocated value dictionary of each symbol sort.
     interners: Mutex<HashMap<AstId, Arc<dyn Any + Send + Sync>>>,
@@ -342,30 +370,54 @@ impl Context {
         column
     }
 
-    /// Binds the scalar `domain`, returning its existing column when it is
-    /// bound.
+    /// Binds `field`, returning its existing column when it is bound.
     ///
     /// A record member binds to the backend selected by
-    /// [`Context::set_representation`] or else to `sparse`. A plain scalar
-    /// sort or a product projection binds to `sparse`.
+    /// [`Context::set_representation`] or else to `sparse`. An anonymous
+    /// scalar binds to `sparse`.
     ///
     /// # Panics
     ///
-    /// Panics if `domain` belongs to another context or is an aggregate, no
-    /// `sparse` backend is registered when the default is needed, or the
-    /// context is shared when a new column or binding is needed.
-    pub fn bind(&mut self, domain: impl Domain) -> ColumnId {
-        let (sort, key) = domain.key(self);
-        assert!(sort.context == self.id, "sort belongs to another context");
-        let scalar = sort.scalar();
-        if let Some(&column) = key.and_then(|k| self.fields.get(&k)) {
+    /// Panics if `field` belongs to another context or is neither a scalar sort
+    /// nor a scalar record accessor, no `sparse` backend is registered when the
+    /// default is needed, or a new binding is needed while the context is
+    /// shared.
+    pub fn bind_field(&mut self, field: impl Into<Field>) -> ColumnId {
+        let field = field.into();
+        assert!(field.context == self.id, "field belongs to another context");
+        if let Some(&column) = self.fields.get(&field.id) {
             return column;
         }
+        let scalar = {
+            let nodes = self.ast.shared.read(());
+            let node = nodes.node(field.id);
+            let kind = match node.kind {
+                NodeKind::Accessor(_)
+                    if nodes.node(node.edges[0]).kind == NodeKind::Sort(SortKind::Tuple) =>
+                {
+                    nodes.node(node.edges[1]).kind
+                }
+                kind => kind,
+            };
+            let NodeKind::Sort(SortKind::Scalar(scalar)) = kind else {
+                panic!("field binding requires a scalar sort or record accessor");
+            };
+            scalar
+        };
         let column = self.column(self.backend("sparse"), scalar);
-        if let Some(k) = key {
-            self.data_mut().fields.insert(k, column);
-        }
+        self.data_mut().fields.insert(field.id, column);
         column
+    }
+
+    /// The column bound to `field`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `field` belongs to another context or is not bound.
+    pub fn field(&self, field: impl Into<Field>) -> ColumnId {
+        let field = field.into();
+        assert!(field.context == self.id, "field belongs to another context");
+        *self.fields.get(&field.id).expect("field must be bound")
     }
 
     /// The value dictionary of the symbol sort `sort`, allocated on first use

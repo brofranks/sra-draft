@@ -13,6 +13,8 @@ mod bdd;
 #[allow(dead_code)]
 mod context;
 #[allow(dead_code)]
+mod row;
+#[allow(dead_code)]
 mod scalar;
 #[allow(dead_code)]
 mod sparse;
