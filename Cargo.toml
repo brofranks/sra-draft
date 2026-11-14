@@ -9,3 +9,11 @@ description = "Hybrid symbolic and concrete binary relations with fused, user-co
 
 [dependencies]
 num-bigint = "0.4.7"
+
+[lints.clippy]
+# Fused combinator types are long by construction, and naming the parts hides
+# the structure that monomorphization depends on.
+type_complexity = "allow"
+# `walk` threads the whole traversal state; grouping it into a struct would add
+# indirection to a hot path for no gain in clarity.
+too_many_arguments = "allow"

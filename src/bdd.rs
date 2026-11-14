@@ -5,7 +5,7 @@
 //! value. A zero-edge node is a terminal storing its value: [`Function::FALSE`]
 //! and [`Function::TRUE`] are terminals 0 and 1, a predicate uses only those,
 //! and a partition uses densely numbered `u32` terminals in first-appearance
-//! order. The [`BddStore`] type implements [`Backend`], and [`Span`] places a
+//! order. The [`BddStore`] type implements [`Backend`], and a span places a
 //! sort's encoded value on levels.
 //!
 //! Construction and transformation recurse with diagram depth, so their stack

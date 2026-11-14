@@ -19,8 +19,10 @@ use std::ops::Deref;
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
+use num_bigint::BigUint;
+
 use crate::ast::{AstId, AstStore, FuncDecl, NodeKind, Sort, SortKind};
-use crate::backend::{Backend, BoolOp, Column, Function};
+use crate::backend::{Backend, BoolOp, Column, Function, MapSpec};
 use crate::bdd::BddStore;
 use crate::index::{IndexData, dec_partition_refs};
 use crate::scalar::{self, ScalarSort};
@@ -234,6 +236,53 @@ impl Predicate {
         let c = self.cx.resolve(self.column);
         assert!(c.sort().accepts(value), "value is outside the column sort");
         c.evaluate(self.function, value) != 0
+    }
+
+    /// The exact number of accepted scalar values, without enumerating
+    /// members.
+    pub fn count(&self) -> BigUint {
+        self.cx.resolve(self.column).count(self.function)
+    }
+
+    /// Whether this is the true predicate constant.
+    #[inline(always)]
+    pub const fn is_t(&self) -> bool {
+        self.function.is_t()
+    }
+
+    /// Whether this is the false predicate constant.
+    #[inline(always)]
+    pub const fn is_f(&self) -> bool {
+        self.function.is_f()
+    }
+
+    /// The union with `other`, as a fresh owned handle over the same column.
+    pub fn or(&self, other: &Self) -> Self {
+        self.cx.apply_bool(BoolOp::Or, self, other)
+    }
+
+    /// The intersection with `other`, as a fresh owned handle over the same
+    /// column.
+    pub fn and(&self, other: &Self) -> Self {
+        self.cx.apply_bool(BoolOp::And, self, other)
+    }
+
+    /// The values of this predicate not in `other`, as a fresh owned handle
+    /// over the same column.
+    pub fn difference(&self, other: &Self) -> Self {
+        self.cx.apply_bool(BoolOp::AndNot, self, other)
+    }
+
+    /// The complement within the column's exact logical universe.
+    pub fn not(&self) -> Self {
+        self.cx
+            .apply_bool(BoolOp::AndNot, &self.cx.t(self.column), self)
+    }
+
+    /// The predicate selecting `yes` where this predicate holds and `no`
+    /// elsewhere, in the same input universe.
+    pub fn ite(&self, yes: &Self, no: &Self) -> Self {
+        self.cx.ite(self, yes, no)
     }
 
     /// Transfers the owned root reference with its context and physical column.
@@ -587,6 +636,45 @@ impl Context {
             .resolve(column)
             .ite(condition.function, yes.function, no.function);
         self.adopt(column, function)
+    }
+
+    /// A handle on the live root `f` of `column`, acquiring its own reference.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `column` belongs to another context.
+    #[inline(always)]
+    pub fn predicate(&self, column: ColumnId, f: Function) -> Predicate {
+        self.resolve(column).inc_ref(f);
+        self.adopt(column, f)
+    }
+
+    /// Moves a predicate through `map` within one column.
+    ///
+    /// The result is the image of `p` within `q` when `image`, otherwise the
+    /// preimage of `q` within `p`, as one owned reference in that column.
+    /// Each column has one backend per sort, so the endpoints of a map share
+    /// a column exactly when they share a backend, and cross-backend
+    /// conversion is unsupported.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the two columns differ or `map` does not fit the column's
+    /// scalar sort.
+    pub fn transfer(
+        &self,
+        map: &MapSpec,
+        (xc, p): (ColumnId, Function),
+        (yc, q): (ColumnId, Function),
+        image: bool,
+    ) -> Function {
+        assert!(xc == yc, "cross-backend transformations are unsupported");
+        let c = self.resolve(xc);
+        if image {
+            c.image(map, p, q)
+        } else {
+            c.preimage(map, p, q)
+        }
     }
 }
 
