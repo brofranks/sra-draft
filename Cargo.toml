@@ -1,0 +1,8 @@
+[package]
+name = "sra"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Hybrid symbolic and concrete binary relations with fused, user-controlled query execution"
+readme = "README.md"
+license = "Apache-2.0"
