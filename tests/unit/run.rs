@@ -17,6 +17,7 @@ use crate::backend::{
 };
 use crate::context::Context;
 use crate::map;
+use crate::pred;
 use crate::query::{IntoQuery, Query, id};
 use crate::rel::Rel;
 use crate::row::{Domain, Row};
@@ -251,8 +252,8 @@ fn equations_transfer_narrowings_along_the_whole_chain() {
     let s = set(&cx, &four, [1, 2, 3]);
     let q = s.select(map::bvor(4_u8)).select(map::bvor(8_u8));
     assert_eq!(pairs(&q.collect()), [(1, 13), (2, 14), (3, 15)].into());
-    assert!((&q).with(&set(&cx, &four, [13])).count().to_string() == "1");
-    assert!(q.with(&set(&cx, &four, [0])).is_empty());
+    assert!((&q).with(pred::eq(13_u8)).count().to_string() == "1");
+    assert!(q.with(pred::eq(0_u8)).is_empty());
     // An identity map keeps a fresh endpoint, which a union with the
     // unmapped relation reads beside the stored range cell.
     let r = relation(&cx, &four, [(1, 2), (2, 3)]);
@@ -268,14 +269,25 @@ fn unsatisfiable_restrictions_narrow_to_nothing() {
     let four = bv(&mut cx, 4);
     // No equations are active, and the restriction narrows the only cell to
     // the false predicate: a disjoint set leaves nothing, and an empty set
-    // leaves no branch at all.
+    // leaves no branch at all. Stored sets and filters agree.
     let s = set(&cx, &four, [1, 2, 3]);
     let (nine, none) = (set(&cx, &four, [9]), set(&cx, &four, []));
     assert!(s.with(&nine).is_empty());
     assert_eq!(s.with(&nine).count().to_string(), "0");
+    assert!(s.with(pred::eq(9_u8)).is_empty());
+    assert_eq!(s.with(pred::eq(9_u8)).count().to_string(), "0");
     assert!(Query::id(&cx, four.clone()).with(&none).is_empty());
+    assert!(
+        Query::id(&cx, four.clone())
+            .with(pred::bvult(0_u8))
+            .is_empty()
+    );
     let mut seen = BTreeSet::new();
     let _ = s.with(&none).drive(&mut |d, _| {
+        seen.insert(d.predicate(0).count().to_string());
+        std::ops::ControlFlow::<()>::Continue(())
+    });
+    let _ = s.with(pred::bvult(0_u8)).drive(&mut |d, _| {
         seen.insert(d.predicate(0).count().to_string());
         std::ops::ControlFlow::<()>::Continue(())
     });

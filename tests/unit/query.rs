@@ -10,6 +10,7 @@ use std::ops::ControlFlow;
 
 use super::{IntoQuery, Query, id};
 use crate::context::Context;
+use crate::pred;
 use crate::rel::Rel;
 use crate::row::{self, Domain, Row};
 
@@ -73,11 +74,15 @@ fn pairs(rel: &Rel) -> BTreeSet<(u64, u64)> {
 // --- union and operand checks ---------------------------------------------
 
 #[test]
-fn union_merges_sets_and_relations() {
+fn union_merges_sets_relations_and_contextual_operands() {
     let mut cx = Context::default();
     let four = bv(&mut cx, 4);
     let (s, t) = (set(&cx, &four, [1, 2, 3]), set(&cx, &four, [2, 3, 4]));
     assert_eq!(values(&s.union(&t).collect()), [1, 2, 3, 4].into());
+    assert_eq!(
+        values(&s.union(pred::eq(9_u8)).collect()),
+        [1, 2, 3, 9].into()
+    );
     assert_eq!(values(&s.union(&s).collect()), [1, 2, 3].into());
     let (r, r2) = (
         relation(&cx, &four, [(1, 2), (2, 3)]),
@@ -180,6 +185,10 @@ fn intersection_keeps_shared_pairs() {
     let four = bv(&mut cx, 4);
     let (s, t) = (set(&cx, &four, [1, 2, 3]), set(&cx, &four, [2, 3, 4]));
     assert_eq!(values(&s.intersection(&t).collect()), [2, 3].into());
+    assert_eq!(
+        values(&s.intersection(pred::bvult(3_u8)).collect()),
+        [1, 2].into()
+    );
     let (r, r2) = (
         relation(&cx, &four, [(1, 2), (2, 3)]),
         relation(&cx, &four, [(2, 3), (3, 4)]),
@@ -254,6 +263,7 @@ fn inverse_swaps_endpoints_and_composition_chains_them() {
         [(1, 5), (2, 6), (2, 7)].into()
     );
     assert_eq!(pairs(&r.select(id()).collect()), [(1, 2), (2, 3)].into());
+    assert_eq!(pairs(&r.select(pred::eq(3_u8)).collect()), [(2, 3)].into());
     // Borrowed queries and doubly borrowed operands share the same nodes.
     let q = (&r).into_query();
     let borrowed = &q;
@@ -437,6 +447,10 @@ fn minus_subtracts_keys_and_pairs() {
         pairs(&r.minus(&set(&cx, &four, [2])).collect()),
         [(1, 2), (3, 4)].into()
     );
+    assert_eq!(
+        pairs(&r.minus(pred::bvult(3_u8)).collect()),
+        [(3, 4)].into()
+    );
     // The right range is hidden: a relation with another range sort still
     // keys the domain.
     let mut other = Rel::new(&cx, four.clone(), eight);
@@ -468,6 +482,10 @@ fn pairing_and_restriction_share_the_domain() {
     assert_eq!(
         rows(&r.and(&r2).collect()),
         [[1, 2, 5], [1, 2, 6]].map(Vec::from).into()
+    );
+    assert_eq!(
+        rows(&r.and(pred::eq(2_u8)).collect()),
+        [[2, 3, 2]].map(Vec::from).into()
     );
     assert_eq!(
         pairs(&r.with(&set(&cx, &four, [3])).collect()),

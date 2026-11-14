@@ -4,7 +4,8 @@
 //! the column abstraction that [`bdd`] and [`sparse`] implement, [`ast`] and
 //! [`context`] the sorts, declarations, and store registry, [`row`],
 //! [`partition`], and [`index`] the stored shape of a relation, and [`rel`],
-//! [`query`], and [`run`] the relations, combinators, and their execution.
+//! [`query`], and [`run`] the relations, combinators, and their execution,
+//! with [`pred`] the field predicates that restrict them.
 #![warn(missing_docs)]
 
 #[macro_use]
@@ -17,6 +18,7 @@ pub mod context;
 pub mod index;
 pub mod map;
 pub mod partition;
+pub mod pred;
 pub mod query;
 pub mod rel;
 pub mod row;
@@ -28,7 +30,8 @@ pub use ast::{FuncDecl, FuncInfo, Sort, SortKind, TupleDecl};
 pub use backend::{Backend, BoolOp, Column, Function, MapSpec, Members};
 pub use bdd::BddStore;
 pub use context::{BackendId, ColumnId, Context, Predicate};
-pub use query::{IntoQuery, Query};
+pub use pred::{Build, Filter, Membership};
+pub use query::{IntoQuery, Operand, Query};
 pub use rel::Rel;
 pub use row::{IntoRow, Row};
 pub use run::Binding;

@@ -483,7 +483,10 @@ fn universe(a: Universe, b: Universe, domain: Sort, range: Sort) -> Universe {
     }
 }
 
-fn make<A>(
+/// A query over `node` with the given boundary slots and endpoint wiring.
+///
+/// `ends` lists the slot of each domain cell and then each range cell.
+pub fn make<A>(
     cx: &Context,
     node: A,
     domain: Sort,
@@ -685,6 +688,17 @@ pub trait IntoQuery: Sized {
     type Node: Exec;
     /// The closed query.
     fn into_query(self) -> Query<Self::Node>;
+
+    /// Membership disjunction with `b`, accepting a domain value when either
+    /// operand has a witness.
+    ///
+    /// The operands may have different ranges. The result is a contextual
+    /// predicate operand for filtering and enumerates only through an enclosing
+    /// query.
+    #[inline(always)]
+    fn or<B: Operand>(self, b: B) -> crate::pred::Disj<Self, B> {
+        crate::pred::Disj(self, b)
+    }
 
     /// Lazy set union: visit the left alternative before the right, stopping
     /// on a break.
@@ -1089,13 +1103,13 @@ impl IntoQuery for &Rel {
 ///
 /// This executes a decision procedure, unlike the structural `==` a reader may
 /// expect, and it reports emptiness alone; `symmetric_difference` keeps the
-/// differing pairs for inspection. This also puts an `eq` method in scope on
-/// queries. The field and expression `eq` that builds a symbolic predicate
-/// lives on the expression view, so there is no collision, but giving `Query`
-/// that view would make `q.eq(x)` ambiguous. The right operand is spelled out
-/// per type rather than bounded generically: a `for<'x> &'x B: IntoQuery` bound
-/// recurses without limit through the borrowed-operand impl above, which makes
-/// `&&A` a query whenever `&A` is one.
+/// differing pairs for inspection. Inherent selector `eq` and `ne` construct
+/// predicates and take precedence over trait method syntax. Semantic query
+/// comparisons use `==`, `!=`, or explicitly qualified [`PartialEq`] methods.
+///
+/// The right operand is spelled out per type rather than bounded generically:
+/// a `for<'x> &'x B: IntoQuery` bound recurses without limit through the
+/// borrowed-operand impl above, which makes `&&A` a query whenever `&A` is one.
 ///
 /// # Panics
 ///
