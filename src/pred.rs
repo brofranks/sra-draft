@@ -444,7 +444,6 @@ impl<T: IntoRow> Build for Compare<T> {
         check(input, index, positions);
         let cx = index.context();
         let column = row::bitvector_column(input);
-        let width = cx.resolve(column).sort().width();
         let mut value = Vec::new();
         row::append(cx, &self.value, input, &mut value);
         let mut p = cx.less_than(column, &value);
@@ -452,7 +451,7 @@ impl<T: IntoRow> Build for Compare<T> {
             // Signed order flips the sign bit: a negative bound keeps only
             // negative values below it, and a nonnegative bound keeps every
             // negative value as well.
-            let (w, bit) = (((width - 1) / 64) as usize, 1 << ((width - 1) % 64));
+            let (w, bit) = cx.resolve(column).sort().sign_bit();
             let mut sign = vec![0; value.len()];
             sign[w] = bit;
             let negative = cx.t(column).difference(&cx.less_than(column, &sign));

@@ -96,6 +96,13 @@ impl ScalarSort {
         }
     }
 
+    /// The word index and mask of the highest bit, which two's complement reads
+    /// as the sign.
+    pub const fn sign_bit(self) -> (usize, u64) {
+        let top = self.width() - 1;
+        ((top / u64::BITS) as usize, 1 << (top % u64::BITS))
+    }
+
     /// Whether `value` is a valid encoding of this sort: exactly [`Self::words`]
     /// words with no bit set beyond the width.
     pub const fn accepts(self, value: &[u64]) -> bool {

@@ -65,8 +65,15 @@
 //! let wrong = a.select(&b);
 //! ```
 
+pub mod finite_set;
+pub mod interned;
 pub mod map;
 pub mod pred;
+pub mod value;
+
+pub use finite_set::{FiniteSet, Universe};
+pub use interned::{Capacity, Dictionary, Domain, Interned};
+pub use value::{Int, UInt};
 
 use std::marker::PhantomData;
 use std::ops::ControlFlow;
@@ -75,7 +82,7 @@ use crate::ast::Sort;
 use crate::backend::BoolOp;
 use crate::context::Context;
 use crate::query::{self, IntoQuery as RawQuery, Operand as RawOperand};
-use crate::row::{Domain, IntoRow, Row};
+use crate::row::{Domain as RowDomain, IntoRow, Row};
 use crate::run::Exec;
 
 /// Ordered scalar interpretations after flattening records and anonymous
@@ -257,7 +264,7 @@ impl<D, R> Clone for FuncDecl<D, R> {
     }
 }
 impl<D, R> Copy for FuncDecl<D, R> {}
-impl<D: Sorted, R: Sorted> Domain for FuncDecl<D, R> {
+impl<D: Sorted, R: Sorted> RowDomain for FuncDecl<D, R> {
     #[inline(always)]
     fn bind(self, cx: &mut Context) -> Row {
         self.raw.bind(cx)

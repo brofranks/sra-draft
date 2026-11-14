@@ -6,9 +6,10 @@
 //! the three-pair `chain` relation over bound 8-bit endpoints.
 
 use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
 use std::ops::ControlFlow;
 
-use super::{Except, FuncDecl, IntoQuery, Query, Record, Rel, Sorted, Variable, id};
+use super::{Except, FuncDecl, Int, IntoQuery, Query, Record, Rel, Sorted, UInt, Variable, id};
 use crate::ast::{Sort, TupleDecl};
 use crate::backend::BoolOp;
 use crate::context::Context;
@@ -115,6 +116,11 @@ fn rust_interpretations_select_runtime_sorts() {
     assert_eq!(isize::sort(&cx), cx.bv_sort(isize::BITS));
     assert_eq!(bool::sort(&cx), cx.bool_sort());
     assert_eq!(<()>::sort(&cx), cx.unit_sort());
+    // Signedness and custom widths are Rust interpretations of the same
+    // runtime bits.
+    assert_eq!(UInt::<3>::sort(&cx), cx.bv_sort(3));
+    assert_eq!(Int::<3>::sort(&cx), cx.bv_sort(3));
+    assert_eq!(Ipv4Addr::sort(&cx), cx.bv_sort(32));
 
     // Each tuple arity constructs its component product directly. Product
     // normalization also accepts equivalent nested and unit-terminated forms.
