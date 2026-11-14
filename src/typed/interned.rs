@@ -19,7 +19,8 @@
 //!
 //! String literals intern wherever they pack, including `contains` and `eq`,
 //! so a lookup miss still assigns an ID and counts toward a `Capacity`. Use
-//! [`Dictionary::get`] to look up a value without adding it.
+//! [`Dictionary::get`] to look up a value without adding it. `Expr::map_by`
+//! instead interns its images during execution.
 
 use std::borrow::Borrow;
 use std::cmp::Ordering;
@@ -28,7 +29,7 @@ use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use super::{Cons, Nil, Sorted, Universe};
+use super::{Cons, Nil, Sorted, Universe, View, expr};
 use crate::ast::{AstId, Sort};
 use crate::context::{Context, Interner};
 use crate::row::{IntoRow, RowRef, RowSink};
@@ -114,7 +115,8 @@ impl<D> fmt::Debug for Interned<D> {
     }
 }
 
-fn interner<D: Domain>(cx: &Context) -> Arc<Interner<D::Value>> {
+/// The value table of namespace `D` in `cx`.
+pub fn interner<D: Domain>(cx: &Context) -> Arc<Interner<D::Value>> {
     cx.interner::<D::Value>(cx.symbol_sort(D::NAME))
 }
 
@@ -123,6 +125,13 @@ impl<D: Domain> Sorted for Interned<D> {
     #[inline(always)]
     fn sort(cx: &Context) -> Sort {
         interner::<D>(cx).sort
+    }
+}
+impl<D: Domain> View for Interned<D> {
+    type Expr<X: Sorted> = expr::Expr<X, Self>;
+    #[inline(always)]
+    fn view<X: Sorted>(input: Self::Expr<X>) -> Self::Expr<X> {
+        input
     }
 }
 impl<D: Domain> IntoRow for Interned<D> {
@@ -142,9 +151,9 @@ impl<D: Domain> IntoRow for Interned<D> {
 
 /// String conversion in the consuming row's context.
 ///
-/// Interning occurs while packing literals and rows, not during backend
-/// traversal. Both `str` and `String` literals use the `str` table, so the
-/// namespace must declare `Value = str`.
+/// This conversion interns while packing literals and rows, which precede
+/// backend traversal. Both `str` and `String` literals use the `str` table,
+/// so the namespace must declare `Value = str`.
 impl IntoRow for str {
     #[inline(always)]
     fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {

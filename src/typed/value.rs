@@ -7,7 +7,7 @@
 use std::cmp::Ordering;
 use std::net::Ipv4Addr;
 
-use super::{Cons, Integer, Nil, Sorted};
+use super::{Cons, Integer, Nil, Sorted, View, expr};
 use crate::ast::Sort;
 use crate::context::Context;
 use crate::row::{self, IntoRow, RowRef, RowSink};
@@ -17,6 +17,13 @@ impl Sorted for Ipv4Addr {
     type Shape = Cons<Self, Nil>;
     fn sort(cx: &Context) -> Sort {
         cx.bv_sort(32)
+    }
+}
+impl View for Ipv4Addr {
+    type Expr<D: Sorted> = expr::Expr<D, Self>;
+    #[inline(always)]
+    fn view<D: Sorted>(input: expr::Expr<D, Self>) -> Self::Expr<D> {
+        input
     }
 }
 impl IntoRow for Ipv4Addr {
@@ -142,6 +149,11 @@ macro_rules! integers {
         impl<const N: u32> Sorted for $t<N> {
             type Shape = Cons<Self, Nil>;
             fn sort(cx: &Context) -> Sort { cx.bv_sort(N) }
+        }
+        impl<const N: u32> View for $t<N> {
+            type Expr<D: Sorted> = expr::Expr<D, Self>;
+            #[inline(always)]
+            fn view<D: Sorted>(input: expr::Expr<D, Self>) -> Self::Expr<D> { input }
         }
         impl<const N: u32> Integer for $t<N> { const SIGNED: bool = $signed; }
         impl<const N: u32> IntoRow for $t<N> {

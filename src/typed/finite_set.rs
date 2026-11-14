@@ -8,7 +8,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::marker::PhantomData;
 
-use super::{Cons, Nil, Sorted};
+use super::{Cons, Nil, Sorted, View, expr};
 use crate::ast::Sort;
 use crate::backend::BoolOp;
 use crate::context::Context;
@@ -218,6 +218,13 @@ impl<U: Universe> Sorted for FiniteSet<U> {
     type Shape = Cons<Self, Nil>;
     fn sort(cx: &Context) -> Sort {
         cx.bv_sort(U::LEN)
+    }
+}
+impl<U: Universe> View for FiniteSet<U> {
+    type Expr<D: Sorted> = expr::Expr<D, Self>;
+    #[inline(always)]
+    fn view<D: Sorted>(input: expr::Expr<D, Self>) -> Self::Expr<D> {
+        input
     }
 }
 impl<U: Universe> IntoRow for FiniteSet<U> {

@@ -65,12 +65,14 @@
 //! let wrong = a.select(&b);
 //! ```
 
+pub mod expr;
 pub mod finite_set;
 pub mod interned;
 pub mod map;
 pub mod pred;
 pub mod value;
 
+pub use expr::Functional;
 pub use finite_set::{FiniteSet, Universe};
 pub use interned::{Capacity, Dictionary, Domain, Interned};
 pub use value::{Int, UInt};
@@ -115,8 +117,8 @@ impl<H, L: Concat<T>, T> Concat<T> for Cons<H, L> {
 /// `Same` checks scalar interpretations in query composition, while runtime
 /// compatibility preserves named records and their declared argument tuples.
 /// Literals, mixed insertion, membership, and lookup retain contextual
-/// `IntoRow` packing. Explicit raw conversion likewise checks runtime sorts,
-/// not erased Rust interpretations.
+/// `IntoRow` packing. Explicit raw conversion and [`expr::Expr::field`]
+/// likewise check runtime sorts, not erased Rust interpretations.
 pub trait Sorted: Sized {
     /// The flattened scalar interpretations, compared by [`Same`] during
     /// query composition.
@@ -143,6 +145,22 @@ pub trait Sorted: Sized {
     }
 }
 
+/// Symbolic closure input for a Rust interpretation.
+///
+/// Records provide
+/// field-bearing views; custom scalar types can opt in with
+/// `type Expr<D: Sorted> = expr::Expr<D, Self>`.
+// TODO(manual-review): Revisit the View definition and its requirement for symbolic mapping.
+// The separate trait and custom-scalar opt-in seem complicated; review whether the same
+// record/scalar behavior can have a simpler contract without requiring View for storage.
+pub trait View: Sorted {
+    /// The closure input handed to `map` and `filt` for a closure over domain
+    /// `D`.
+    type Expr<D: Sorted>: expr::Functional<D = D, R = Self>;
+    /// Wraps the functional input expression in this interpretation's view.
+    fn view<D: Sorted>(input: expr::Expr<D, Self>) -> Self::Expr<D>;
+}
+
 /// Equal scalar interpretations; query construction additionally checks
 /// nominal compatibility.
 pub trait Same<T: Sorted>: Sorted {}
@@ -162,6 +180,11 @@ macro_rules! integers {
             type Shape = Cons<Self, Nil>;
             fn sort(cx: &Context) -> Sort { cx.bv_sort(<$t>::BITS) }
         }
+        impl View for $t {
+            type Expr<D: Sorted> = expr::Expr<D, Self>;
+            #[inline(always)]
+            fn view<D: Sorted>(input: expr::Expr<D, Self>) -> Self::Expr<D> { input }
+        }
         impl Integer for $t { const SIGNED: bool = $signed; }
     )*};
 }
@@ -179,6 +202,20 @@ impl Sorted for () {
         cx.unit_sort()
     }
 }
+impl View for bool {
+    type Expr<D: Sorted> = expr::Expr<D, Self>;
+    #[inline(always)]
+    fn view<D: Sorted>(input: expr::Expr<D, Self>) -> Self::Expr<D> {
+        input
+    }
+}
+impl View for () {
+    type Expr<D: Sorted> = expr::Expr<D, Self>;
+    #[inline(always)]
+    fn view<D: Sorted>(input: expr::Expr<D, Self>) -> Self::Expr<D> {
+        input
+    }
+}
 macro_rules! tuples {
     ($a:ident $(,$b:ident)* $(,)?) => {
         impl<$a: Sorted, $($b: Sorted),*> Sorted for ($a, $($b,)*)
@@ -191,6 +228,12 @@ macro_rules! tuples {
                 let sorts = [$a::bind(cx).sort, $($b::bind(cx).sort),*];
                 cx.product_sort(sorts).bind(cx)
             }
+        }
+        impl<$a: Sorted, $($b: Sorted),*> View for ($a, $($b,)*)
+        where Self: Sorted {
+            type Expr<X: Sorted> = expr::Expr<X, Self>;
+            #[inline(always)]
+            fn view<X: Sorted>(input: expr::Expr<X, Self>) -> Self::Expr<X> { input }
         }
         tuples!($($b),*);
     };
@@ -821,6 +864,43 @@ pub trait IntoQuery: Sized {
         let a = self.into_query().raw;
         let b = b.resolve(&a.cx, &a.range);
         Query::wrap(a.select(b))
+    }
+    /// Builds a functional range transformation once, preserving the domain.
+    ///
+    /// `q.map(|x| x | 16)` lowers through the existing bitwise map and
+    /// `select`. The closure receives a symbolic expression, not a concrete
+    /// value; arbitrary Rust callbacks cannot be translated. Collection
+    /// retains the existing set semantics.
+    #[inline(always)]
+    fn map<O: expr::Functional<D = Self::R>>(
+        self,
+        f: impl FnOnce(<Self::R as View>::Expr<Self::R>) -> O,
+    ) -> Query<Self::D, O::R, query::Join<Self::Node, O::Node>>
+    where
+        Self::R: View,
+    {
+        let a = self.into_query();
+        let b = f(Self::R::view(expr::Expr::input(&a)));
+        a.select(b.into_query())
+    }
+    /// Builds a symbolic restriction once, preserving both original
+    /// endpoints.
+    ///
+    /// Use `q.filt(|x| x.gt(10))`: Rust's `>` must return `bool`,
+    /// so it cannot build a symbolic predicate. Combine predicates with `&`,
+    /// `|`, and `!`, not `&&` or `||`. See [`expr`] for transformations
+    /// inside predicates and expression reuse.
+    #[inline(always)]
+    fn filt<A: Exec>(
+        self,
+        f: impl FnOnce(<Self::R as View>::Expr<Self::R>) -> expr::Condition<Self::R, A>,
+    ) -> Query<Self::D, Self::R, query::Join<Self::Node, A>>
+    where
+        Self::R: View,
+    {
+        let a = self.into_query();
+        let b = f(Self::R::view(expr::Expr::input(&a)));
+        a.with(b.into_query())
     }
     /// Lazy pairing on a shared domain: `(d, r)` here and `(d, s)` in `b` yield
     /// `(d, (r, s))`.
