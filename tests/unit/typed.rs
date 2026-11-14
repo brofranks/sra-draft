@@ -304,6 +304,12 @@ fn combinators_forward_to_the_raw_query_layer() {
     // `and` pairs both ranges under the shared domain key.
     assert_eq!((&rel).and(&rel).count(), 3_u32.into());
     assert_eq!((&rel).and(&step).count(), 1_u32.into());
+    // A disjunction of operands is a predicate on the shared domain, kept via
+    // `with`.
+    assert_eq!(
+        pairs(&(&rel).with((&step).or(&rel)).collect().raw),
+        [(0, 1), (1, 2), (2, 3)].into_iter().collect()
+    );
 
     // `id()` contributes the consuming query's own row type and columns.
     assert_eq!((&rel).select(id()).count(), 3_u32.into());

@@ -590,10 +590,9 @@ macro_rules! ranges {
 ranges!(
     Range, |r| bvuge(&r.start) & bvult(&r.end);
     RangeFrom, |r| bvuge(&r.start);
-    // An iterated range reports an excluded end bound once it is exhausted.
-    // Exhaustion leaves `start()` and `end()` unspecified, so the strict
-    // comparison takes its value from that bound. Every other inclusive range
-    // keeps its end.
+    // An iterated range can report an excluded end bound. Exhaustion leaves
+    // `start()` and `end()` unspecified, so the strict comparison takes its
+    // value from that bound. Every other inclusive range keeps its end.
     RangeInclusive, |r| bvuge(r.start())
         & match r.end_bound() { Bound::Excluded(e) => bvult(e), _ => bvule(r.end()) };
     RangeTo, |r| bvult(&r.end);

@@ -65,6 +65,9 @@
 //! let wrong = a.select(&b);
 //! ```
 
+pub mod map;
+pub mod pred;
+
 use std::marker::PhantomData;
 use std::ops::ControlFlow;
 
@@ -689,20 +692,6 @@ impl<X: Same<D>, D: Sorted, R: Sorted> Operand<X> for &FuncDecl<D, R> {
     #[inline(always)]
     fn resolve(self, cx: &Context, input: &Row) -> query::Query<()> {
         Operand::<X>::resolve(*self, cx, input)
-    }
-}
-/// A membership disjunction resolves both typed operands against the
-/// consuming query and accepts the domain keys either one accepts.
-impl<D: Sorted, A: Operand<D>, B: Operand<D>> Operand<D> for crate::pred::Disj<A, B> {
-    type R = D;
-    type Node = query::Union<query::Join<(), A::Node>, query::Join<(), B::Node>>;
-    #[inline(always)]
-    fn resolve(self, cx: &Context, input: &Row) -> query::Query<Self::Node> {
-        RawOperand::resolve(
-            crate::pred::Disj(self.0.resolve(cx, input), self.1.resolve(cx, input)),
-            cx,
-            input,
-        )
     }
 }
 /// Explicit raw maps preserve the input type and validate their sort during
