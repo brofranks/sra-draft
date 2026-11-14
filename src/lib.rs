@@ -5,7 +5,8 @@
 //! [`context`] the sorts, declarations, and store registry, [`row`],
 //! [`partition`], and [`index`] the stored shape of a relation, and [`rel`],
 //! [`query`], and [`run`] the relations, combinators, and their execution,
-//! with [`pred`] the field predicates that restrict them.
+//! [`pred`] the field predicates that restrict them, and [`iteration`] the
+//! semi-naive fixed points over them.
 #![warn(missing_docs)]
 
 #[macro_use]
@@ -16,6 +17,7 @@ pub mod backend;
 pub mod bdd;
 pub mod context;
 pub mod index;
+pub mod iteration;
 pub mod map;
 pub mod partition;
 pub mod pred;
@@ -30,6 +32,7 @@ pub use ast::{FuncDecl, FuncInfo, Sort, SortKind, TupleDecl};
 pub use backend::{Backend, BoolOp, Column, Function, MapSpec, Members};
 pub use bdd::BddStore;
 pub use context::{BackendId, ColumnId, Context, Predicate};
+pub use iteration::Variable;
 pub use pred::{Build, Filter, Membership};
 pub use query::{IntoQuery, Operand, Query};
 pub use rel::Rel;
