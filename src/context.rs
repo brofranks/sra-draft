@@ -6,14 +6,20 @@
 //! whole context, so a handle addresses its column by a plain [`ColumnId`]
 //! that checked constructors and operations validate. The context interns one
 //! column per backend and scalar sort, so compatible operands share its ID.
-//! Logical declarations, nominal symbol namespaces, and query occurrences
-//! remain distinct from this physical binding.
+//! The context also owns the logical declarations of its sorts and records
+//! and binds each declared scalar member to one column, so logical identity,
+//! physical identity, and query occurrences remain distinct.
 
+use std::any::Any;
+use std::borrow::Borrow;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::mem::ManuallyDrop;
 use std::ops::Deref;
 use std::ptr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use crate::ast::{AstId, AstStore, Domain, FuncDecl, Sort, SortKind};
 use crate::backend::{Backend, BoolOp, Column, Function};
 use crate::bdd::BddStore;
 use crate::scalar::{self, ScalarSort};
@@ -41,10 +47,71 @@ pub struct ColumnId {
     pub slot: usize,
 }
 
+/// The two-way mapping behind an [`Interner`].
+struct Entries<V: ?Sized> {
+    ids: HashMap<Arc<V>, u64>,
+    values: Vec<Arc<V>>,
+}
+
+/// Context-owned value dictionary for one symbol sort.
+///
+/// Symbol IDs are dense `u64` values in interning order. The context keeps the
+/// values alive for its own lifetime, so resolution succeeds for every ID
+/// previously issued by this dictionary.
+pub struct Interner<V: ?Sized> {
+    /// The symbol sort whose IDs this dictionary names.
+    pub sort: Sort,
+    data: Mutex<Entries<V>>,
+}
+
+impl<V: ?Sized + Eq + Hash> Interner<V> {
+    /// Interns `value`, returning its stable ID.
+    pub fn intern(&self, value: impl Borrow<V> + Into<Arc<V>>) -> u64 {
+        let mut data = self.data.lock().unwrap();
+        if let Some(&id) = data.ids.get(value.borrow()) {
+            return id;
+        }
+        let id = u64::try_from(data.values.len()).expect("symbol ID overflow");
+        let value = value.into();
+        data.values.push(Arc::clone(&value));
+        data.ids.insert(value, id);
+        id
+    }
+
+    /// The ID of an interned value.
+    pub fn get(&self, value: &V) -> Option<u64> {
+        self.data.lock().unwrap().ids.get(value).copied()
+    }
+
+    /// The value behind an ID.
+    pub fn resolve(&self, id: u64) -> Option<Arc<V>> {
+        let data = self.data.lock().unwrap();
+        usize::try_from(id)
+            .ok()
+            .and_then(|i| data.values.get(i))
+            .cloned()
+    }
+
+    /// A snapshot of every interned value with its ID.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (u64, Arc<V>)> + use<V> {
+        let values = self.data.lock().unwrap().values.clone();
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| (i as u64, value))
+    }
+}
+
 /// Shared state of a [`Context`].
 pub struct ContextData {
     /// The context's identity, stamped on every id it issues.
     pub id: u64,
+    /// The logical declarations of this context.
+    pub ast: AstStore,
+    /// The bound column of each declared record member, keyed by accessor.
+    fields: HashMap<AstId, ColumnId>,
+    /// The lazily allocated value dictionary of each symbol sort.
+    interners: Mutex<HashMap<AstId, Arc<dyn Any + Send + Sync>>>,
     // Declared first so columns drop before the backends they bind.
     columns: Vec<(usize, Box<dyn Column>)>,
     backends: Vec<(Box<str>, Arc<dyn Backend>)>,
@@ -185,6 +252,9 @@ impl Context {
         Self {
             data: Arc::new(ContextData {
                 id: fresh_id(),
+                ast: AstStore::default(),
+                fields: HashMap::new(),
+                interners: Mutex::default(),
                 columns: Vec::new(),
                 backends: Vec::new(),
             }),
@@ -225,18 +295,19 @@ impl Context {
     /// # Panics
     ///
     /// Panics if `backend` is not registered in this context, the backend does
-    /// not support `sort`, or the context is shared.
+    /// not support `sort`, or the context is shared when the column is new.
     pub fn column(&mut self, backend: BackendId, sort: ScalarSort) -> ColumnId {
-        let data = self.data_mut();
         assert!(
-            backend.context == data.id,
+            backend.context == self.id,
             "backend belongs to another context"
         );
-        let existing = data
+        let id = self.id;
+        let existing = self
             .columns
             .iter()
             .position(|(b, c)| *b == backend.slot && c.sort() == sort);
         let slot = existing.unwrap_or_else(|| {
+            let data = self.data_mut();
             let column = Arc::clone(&data.backends[backend.slot].1).column(sort);
             data.columns.push((
                 backend.slot,
@@ -244,10 +315,98 @@ impl Context {
             ));
             data.columns.len() - 1
         });
-        ColumnId {
-            context: data.id,
-            slot,
+        ColumnId { context: id, slot }
+    }
+
+    /// Binds the declared scalar member behind `accessor` to a column of
+    /// `backend`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `accessor` belongs to another context or does not project a
+    /// scalar member of a record, `backend` belongs to another context or does
+    /// not support the member's sort, the member is already bound, or the
+    /// context is shared.
+    pub fn set_representation(&mut self, accessor: FuncDecl, backend: BackendId) -> ColumnId {
+        let info = accessor.resolve(self);
+        assert!(
+            info.domain.kind == SortKind::Tuple && info.range.kind.is_scalar(),
+            "representation requires a declared scalar member"
+        );
+        assert!(
+            !self.fields.contains_key(&accessor.id),
+            "field representation is already bound"
+        );
+        let column = self.column(backend, info.range.scalar());
+        self.data_mut().fields.insert(accessor.id, column);
+        column
+    }
+
+    /// Binds the scalar `domain`, returning its existing column when it is
+    /// bound.
+    ///
+    /// A record member binds to the backend selected by
+    /// [`Context::set_representation`] or else to `sparse`. A plain scalar
+    /// sort or a product projection binds to `sparse`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `domain` belongs to another context or is an aggregate, no
+    /// `sparse` backend is registered when the default is needed, or the
+    /// context is shared when a new column or binding is needed.
+    pub fn bind(&mut self, domain: impl Domain) -> ColumnId {
+        let (sort, key) = domain.key(self);
+        assert!(sort.context == self.id, "sort belongs to another context");
+        let scalar = sort.scalar();
+        if let Some(&column) = key.and_then(|k| self.fields.get(&k)) {
+            return column;
         }
+        let column = self.column(self.backend("sparse"), scalar);
+        if let Some(k) = key {
+            self.data_mut().fields.insert(k, column);
+        }
+        column
+    }
+
+    /// The value dictionary of the symbol sort `sort`, allocated on first use
+    /// with the value type `V`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sort` belongs to another context, is not a symbol sort, or
+    /// already interns another value type.
+    pub fn interner<V: ?Sized + Eq + Hash + Send + Sync + 'static>(
+        &self,
+        sort: Sort,
+    ) -> Arc<Interner<V>> {
+        assert!(
+            sort.context == self.id,
+            "symbol sort belongs to another context"
+        );
+        assert!(
+            sort.kind == SortKind::Scalar(ScalarSort::symbol()),
+            "interned values require a symbol sort"
+        );
+        // The registry lock is released before the downcast, so a type
+        // mismatch panics without poisoning the registry.
+        let entry = Arc::clone(
+            self.interners
+                .lock()
+                .unwrap()
+                .entry(sort.id)
+                .or_insert_with(|| {
+                    Arc::new(Interner::<V> {
+                        sort,
+                        data: Mutex::new(Entries {
+                            ids: HashMap::new(),
+                            values: Vec::new(),
+                        }),
+                    })
+                }),
+        );
+        entry
+            .downcast()
+            .expect("symbol sort must intern one value type")
     }
 
     /// The predicate adopting the owned reference to `function` in `column`.

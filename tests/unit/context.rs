@@ -1,5 +1,6 @@
 //! Checks for context ownership: backend registration, column interning, id
-//! boundaries, and the reference balance of predicate handles.
+//! boundaries, the reference balance of predicate handles, member binding,
+//! and symbol interners.
 //!
 //! Most checks build a context through `cx()`, which registers a BDD store as
 //! `bdd` with a 2-node arena, so nonconstant constructions also exercise arena
@@ -18,6 +19,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use super::{Context, Predicate};
+use crate::ast::{Sort, TupleDecl};
 use crate::backend::{Alignment, Backend, BoolOp, Column, Function, Refinement, Values};
 use crate::bdd::BddStore;
 use crate::scalar::ScalarSort;
@@ -128,6 +130,195 @@ fn declaring_a_column_on_a_shared_context_is_rejected() {
     let c = bv(&mut cx, 4);
     let _p = cx.t(c);
     bv(&mut cx, 12);
+}
+
+// --- fields ------------------------------------------------------------------
+
+/// A record with a sparse 4-bit member and a BDD 8-bit member.
+fn record(cx: &mut Context) -> TupleDecl {
+    let t = cx.tuple_decl("T", [("a", cx.bv_sort(4)), ("b", cx.bv_sort(8))]);
+    let bdd = cx.backend("bdd");
+    cx.set_representation(t.accessors[1], bdd);
+    t
+}
+
+#[test]
+fn members_bind_once_to_their_selected_backend() {
+    let mut cx = Context::default();
+    let t = record(&mut cx);
+    let a = cx.bind(t.accessors[0]);
+    let b = cx.bind(t.accessors[1]);
+    assert_ne!(a, b);
+    assert_eq!(cx.bind(t.accessors[0]), a);
+    assert_eq!(cx.bind(t.accessors[1]), b);
+    assert_eq!(a, cx.column(cx.backend("sparse"), BV4));
+    assert_eq!(b, cx.column(cx.backend("bdd"), ScalarSort::bit_vec(8)));
+    // A plain sort and a product projection bind the sparse default.
+    assert_eq!(cx.bind(cx.bv_sort(4)), a);
+    let p = cx.product_sort([cx.bv_sort(4), cx.bv_sort(8)]);
+    let second = cx.project(p, 1);
+    assert_eq!(
+        cx.bind(second),
+        cx.column(cx.backend("sparse"), ScalarSort::bit_vec(8))
+    );
+}
+
+#[test]
+fn column_identity_is_separate_from_logical_identity() {
+    let mut cx = Context::default();
+    let t = cx.tuple_decl("T", [("a", cx.bv_sort(4))]);
+    let u = cx.tuple_decl("U", [("a", cx.bv_sort(4))]);
+    assert_ne!(t.accessors[0], u.accessors[0]);
+    assert!(!cx.compatible(t.sort, u.sort));
+    assert_eq!(cx.bind(t.accessors[0]), cx.bind(u.accessors[0]));
+}
+
+#[test]
+fn bound_fields_hold_predicates() {
+    let mut cx = Context::default();
+    let t = record(&mut cx);
+    for (i, value) in [(0, 3), (1, 200)] {
+        let c = cx.bind(t.accessors[i]);
+        let p = cx.set(c, &[value]);
+        assert_eq!(p.column(), c);
+        assert!(p.contains(&[value]));
+        assert!(!p.contains(&[value - 1]));
+    }
+}
+
+#[test]
+#[should_panic(expected = "field representation is already bound")]
+fn representation_after_binding_is_rejected() {
+    let mut cx = Context::default();
+    let t = cx.tuple_decl("T", [("a", cx.bv_sort(4))]);
+    cx.bind(t.accessors[0]);
+    let bdd = cx.backend("bdd");
+    cx.set_representation(t.accessors[0], bdd);
+}
+
+#[test]
+#[should_panic(expected = "field representation is already bound")]
+fn a_second_representation_is_rejected() {
+    let mut cx = Context::default();
+    let t = record(&mut cx);
+    let sparse = cx.backend("sparse");
+    cx.set_representation(t.accessors[1], sparse);
+}
+
+#[test]
+#[should_panic(expected = "representation requires a declared scalar member")]
+fn a_constructor_representation_is_rejected() {
+    let mut cx = Context::default();
+    let t = cx.tuple_decl("T", [("a", cx.bv_sort(4))]);
+    let bdd = cx.backend("bdd");
+    cx.set_representation(t.constructor, bdd);
+}
+
+#[test]
+#[should_panic(expected = "representation requires a declared scalar member")]
+fn a_nested_record_representation_is_rejected() {
+    let mut cx = Context::default();
+    let inner = cx.tuple_decl("Inner", [("a", cx.bv_sort(4))]);
+    let outer = cx.tuple_decl("Outer", [("inner", inner.sort)]);
+    let bdd = cx.backend("bdd");
+    cx.set_representation(outer.accessors[0], bdd);
+}
+
+#[test]
+#[should_panic(expected = "expected a scalar sort")]
+fn binding_an_aggregate_is_rejected() {
+    let mut cx = Context::default();
+    let t = cx.tuple_decl("T", [("a", cx.bv_sort(4))]);
+    cx.bind(t.sort);
+}
+
+#[test]
+#[should_panic(expected = "sort belongs to another context")]
+fn binding_a_sort_of_another_context_is_rejected() {
+    let sort = Context::default().bv_sort(4);
+    Context::default().bind(sort);
+}
+
+#[test]
+fn redeclaration_and_sharing_keep_bound_members() {
+    let mut cx = Context::default();
+    let t = record(&mut cx);
+    let (a, b) = (cx.bind(t.accessors[0]), cx.bind(t.accessors[1]));
+    let plain = cx.bind(cx.bv_sort(4));
+    let again = cx.tuple_decl("T", [("a", cx.bv_sort(4)), ("b", cx.bv_sort(8))]);
+    assert_eq!(again.accessors, t.accessors);
+    let _shared = cx.clone();
+    assert_eq!(cx.bind(again.accessors[0]), a);
+    assert_eq!(cx.bind(again.accessors[1]), b);
+    assert_eq!(cx.bind(cx.bv_sort(4)), plain);
+}
+
+#[test]
+#[should_panic(expected = "cannot declare backends or columns on a shared context")]
+fn binding_on_a_shared_context_is_rejected() {
+    let mut cx = Context::default();
+    let _shared = cx.clone();
+    cx.bind(cx.bv_sort(4));
+}
+
+#[test]
+#[should_panic(expected = "backend \"sparse\" is not registered")]
+fn a_default_without_a_sparse_backend_is_rejected() {
+    let mut cx = cx();
+    cx.bind(cx.bv_sort(4));
+}
+
+// --- interners ---------------------------------------------------------------
+
+#[test]
+fn interners_assign_stable_ids() {
+    let cx = Context::new();
+    let names = cx.interner::<str>(cx.symbol_sort("Name"));
+    assert_eq!(names.get("a"), None);
+    assert_eq!(names.intern("a"), 0);
+    assert_eq!(names.intern("b"), 1);
+    assert_eq!(names.intern(String::from("a")), 0);
+    assert_eq!(names.get("b"), Some(1));
+    assert_eq!(names.resolve(1).as_deref(), Some("b"));
+    assert_eq!(names.resolve(2), None);
+    assert_eq!(names.resolve(u64::MAX), None);
+    let snapshot: Vec<_> = names.iter().map(|(id, v)| (id, v.to_string())).collect();
+    assert_eq!(snapshot, [(0, "a".to_string()), (1, "b".to_string())]);
+    assert_eq!(cx.interner::<str>(cx.symbol_sort("Name")).sort, names.sort);
+}
+
+#[test]
+fn an_interner_type_mismatch_leaves_the_registry_usable() {
+    let cx = Context::new();
+    let sort = cx.symbol_sort("Name");
+    let names = cx.interner::<str>(sort);
+    let id = names.intern("a");
+    let err = catch_unwind(AssertUnwindSafe(|| cx.interner::<String>(sort))).err();
+    assert!(
+        err.as_ref()
+            .and_then(|e| e.downcast_ref::<String>())
+            .is_some_and(|m| m.starts_with("symbol sort must intern one value type"))
+    );
+    let same = cx.interner::<str>(sort);
+    assert!(Arc::ptr_eq(&names, &same));
+    assert_eq!(same.resolve(id).as_deref(), Some("a"));
+    let other = cx.interner::<str>(cx.symbol_sort("Other"));
+    let id = other.intern("b");
+    assert_eq!(other.resolve(id).as_deref(), Some("b"));
+}
+
+#[test]
+#[should_panic(expected = "interned values require a symbol sort")]
+fn an_interner_over_a_bit_vector_is_rejected() {
+    let cx = Context::new();
+    cx.interner::<str>(cx.bv_sort(8));
+}
+
+#[test]
+#[should_panic(expected = "symbol sort belongs to another context")]
+fn an_interner_of_another_context_is_rejected() {
+    let sort: Sort = Context::new().symbol_sort("Name");
+    Context::new().interner::<str>(sort);
 }
 
 // --- constructors ------------------------------------------------------------

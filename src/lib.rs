@@ -5,6 +5,8 @@
 pub mod util;
 
 #[allow(dead_code)]
+mod ast;
+#[allow(dead_code)]
 mod backend;
 #[allow(dead_code)]
 mod bdd;
