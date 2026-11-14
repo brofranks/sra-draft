@@ -527,8 +527,17 @@ impl Context {
             .expect("symbol sort must intern one value type")
     }
 
-    /// The predicate adopting the owned reference to `function` in `column`.
-    fn adopt(&self, column: ColumnId, function: Function) -> Predicate {
+    /// Adopts the owned reference to `function` in `column`.
+    ///
+    /// The caller transfers one live root reference from this column. Adoption
+    /// preserves its count, and dropping the predicate releases that reference.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `column` is not declared in this context.
+    #[inline(always)]
+    pub fn adopt(&self, column: ColumnId, function: Function) -> Predicate {
+        self.resolve(column);
         Predicate {
             cx: self.clone(),
             column,
@@ -542,7 +551,6 @@ impl Context {
     ///
     /// Panics if `column` is not declared in this context.
     pub fn f(&self, column: ColumnId) -> Predicate {
-        self.resolve(column);
         self.adopt(column, Function::FALSE)
     }
 
@@ -552,7 +560,6 @@ impl Context {
     ///
     /// Panics if `column` is not declared in this context.
     pub fn t(&self, column: ColumnId) -> Predicate {
-        self.resolve(column);
         self.adopt(column, Function::TRUE)
     }
 

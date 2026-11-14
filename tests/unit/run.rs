@@ -9,7 +9,8 @@
 
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::backend::{
     Alignment, Backend, BoolOp, Column, Function, MapSpec, Members, Refinement, Values,
@@ -19,6 +20,7 @@ use crate::map;
 use crate::query::{IntoQuery, Query, id};
 use crate::rel::Rel;
 use crate::row::{Domain, Row};
+use crate::run::Binding;
 use crate::scalar::ScalarSort;
 
 /// A bound row of the bit-vector sort of width `w`.
@@ -76,6 +78,17 @@ fn values(rel: &Rel) -> BTreeSet<u64> {
             r[0]
         })
         .collect()
+}
+
+/// The members of the first cell of `binding`.
+fn members(binding: Binding<'_>) -> Vec<u64> {
+    let (column, f) = binding.root(0);
+    let mut cursor = binding.context().resolve(column).members(f);
+    let (mut value, mut out) = (Vec::new(), Vec::new());
+    while cursor.next(&mut value) {
+        out.push(value[0]);
+    }
+    out
 }
 
 // --- traversal and memoization --------------------------------------------
@@ -277,14 +290,9 @@ fn borrowed_root_names_the_same_cell_as_the_handle() {
     let mut seen = Vec::new();
     let _ = (&s).into_query().drive(&mut |d, r| {
         let p = d.predicate(0);
-        let (column, f) = r.root(0);
-        assert_eq!((p.column(), p.function()), (column, f));
+        assert_eq!((p.column(), p.function()), r.root(0));
         assert!(d.context() == p.context());
-        let mut cursor = d.context().resolve(column).members(f);
-        let mut value = Vec::new();
-        while cursor.next(&mut value) {
-            seen.push(value[0]);
-        }
+        seen.extend(members(r));
         std::ops::ControlFlow::<()>::Continue(())
     });
     seen.sort_unstable();
@@ -293,7 +301,7 @@ fn borrowed_root_names_the_same_cell_as_the_handle() {
 
 #[test]
 fn narrowing_an_empty_cell_never_calls_the_continuation() {
-    use super::{Binding, Mode, Run, Slot, Visit};
+    use super::{Mode, Run, Slot, Visit};
 
     let mut cx = Context::default();
     let two = bv(&mut cx, 2);
@@ -328,20 +336,29 @@ fn narrowing_an_empty_cell_never_calls_the_continuation() {
 
 /// A four-value truth-table store with fresh tokens for nonconstant maps.
 ///
-/// Explicit counts expose leaked or multiply released external roots.
+/// Explicit counts expose leaked or multiply released external roots and
+/// refinement replay.
 #[derive(Clone)]
-struct Table(std::sync::Arc<std::sync::Mutex<Vec<([u32; 4], usize)>>>);
+struct Table {
+    /// The truth table and reference count of each token.
+    entries: Arc<Mutex<Vec<([u32; 4], usize)>>>,
+    /// The number of refinements performed.
+    refines: Arc<AtomicUsize>,
+    /// The refinement ordinal at which reference acquisition fails.
+    fail_at: Arc<AtomicUsize>,
+}
 
 impl Table {
     fn new() -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(vec![
-            ([0; 4], 0),
-            ([1; 4], 0),
-        ])))
+        Self {
+            entries: Arc::new(Mutex::new(vec![([0; 4], 0), ([1; 4], 0)])),
+            refines: Arc::new(AtomicUsize::new(0)),
+            fail_at: Arc::new(AtomicUsize::new(usize::MAX)),
+        }
     }
 
     fn get(&self, f: Function) -> [u32; 4] {
-        let entries = self.0.lock().unwrap();
+        let entries = self.entries.lock().unwrap();
         let (values, refs) = entries[f.index()];
         assert!(f.is_constant() || refs > 0);
         values
@@ -354,7 +371,7 @@ impl Table {
         if values == [1; 4] {
             return Function::TRUE;
         }
-        let mut entries = self.0.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap();
         let f = Function::new(entries.len());
         entries.push((values, 1));
         f
@@ -372,7 +389,7 @@ impl Table {
     }
 
     fn refs(&self) -> usize {
-        self.0.lock().unwrap().iter().map(|(_, n)| n).sum()
+        self.entries.lock().unwrap().iter().map(|(_, n)| n).sum()
     }
 }
 
@@ -389,7 +406,12 @@ impl Column for Table {
 
     fn inc_ref(&self, f: Function) {
         if !f.is_constant() {
-            let mut entries = self.0.lock().unwrap();
+            assert_ne!(
+                self.refines.load(Ordering::Relaxed),
+                self.fail_at.load(Ordering::Relaxed),
+                "injected reference limit"
+            );
+            let mut entries = self.entries.lock().unwrap();
             assert!(entries[f.index()].1 > 0);
             entries[f.index()].1 += 1;
         }
@@ -397,7 +419,7 @@ impl Column for Table {
 
     fn dec_ref(&self, f: Function) {
         if !f.is_constant() {
-            let mut entries = self.0.lock().unwrap();
+            let mut entries = self.entries.lock().unwrap();
             assert!(entries[f.index()].1 > 0);
             entries[f.index()].1 -= 1;
         }
@@ -505,6 +527,7 @@ impl Column for Table {
         select: &mut dyn FnMut(u32) -> bool,
         then: &mut dyn FnMut(u32, &mut dyn FnMut() -> Function) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
+        self.refines.fetch_add(1, Ordering::Relaxed);
         let (slots, values) = (self.get(f), self.get(p));
         for slot in 0..=slots.into_iter().max().unwrap() {
             let cell = std::array::from_fn(|i| u32::from(slots[i] == slot && values[i] != 0));
@@ -552,10 +575,156 @@ impl Column for Table {
 // --- root release ---------------------------------------------------------
 
 #[test]
+fn callback_traversal_replays_a_recurring_refinement() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let table = Table::new();
+    let mut cx = Context::default();
+    let backend = cx.register_backend("table", table.clone());
+    let column = cx.column(backend, table.sort());
+    let row = crate::row::Row::new(&cx, cx.bv_sort(2), [column].into(), 0);
+    let unit = cx.unit_sort().bind(&mut cx);
+    let a = relation(&cx, &row, [(1, 0), (2, 1), (3, 2)]);
+    let mut b = Rel::new(&cx, unit.clone(), row.clone());
+    b.insert_rows([((), 1_u8), ((), 2_u8)]);
+    // Distinct hidden suffixes keep three domain branches separate. After
+    // projection to unit, the right source sees TRUE three times: computed,
+    // recorded, then replayed. Equal suffixes would merge the domain branch.
+    let projection = crate::query::project(&cx, &row, [], unit);
+    let query = (&a).select(&projection).select(&b);
+    let refs = table.refs();
+    let before = table.refines.load(Ordering::Relaxed);
+    let (mut calls, mut seen) = (0, BTreeSet::new());
+    let result = query.drive(&mut |d, r| {
+        calls += 1;
+        for &x in &members(d) {
+            for &y in &members(r) {
+                seen.insert((x, y));
+            }
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    assert!(result.is_continue());
+    assert_eq!(calls, 3);
+    assert_eq!(
+        seen,
+        [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)].into()
+    );
+    // One left refinement and two right refinements prove the third right
+    // call replayed. Callback effects still occur on every branch.
+    assert_eq!(table.refines.load(Ordering::Relaxed) - before, 3);
+    assert_eq!(table.refs(), refs);
+    // Break at first sighting, during recording, and during replay. Every
+    // temporary or memo-owned root is released on each exit.
+    for stop in 1..=3 {
+        let start = table.refines.load(Ordering::Relaxed);
+        let mut n = 0;
+        let flow = query.drive(&mut |_, _| {
+            n += 1;
+            if n == stop {
+                return ControlFlow::Break(());
+            }
+            ControlFlow::Continue(())
+        });
+        assert!(flow.is_break());
+        assert_eq!(n, stop);
+        assert_eq!(
+            table.refines.load(Ordering::Relaxed) - start,
+            if stop == 1 { 2 } else { 3 }
+        );
+        assert_eq!(table.refs(), refs);
+    }
+    for stop in [2, 3] {
+        let mut n = 0;
+        let flow = catch_unwind(AssertUnwindSafe(|| {
+            query.drive(&mut |_, _| {
+                n += 1;
+                assert_ne!(n, stop, "callback stopped");
+                ControlFlow::<()>::Continue(())
+            })
+        }));
+        assert!(flow.is_err());
+        assert_eq!(table.refs(), refs);
+    }
+    drop(query);
+    drop(projection);
+    drop(a);
+    drop(b);
+    drop(cx);
+    assert_eq!(table.refs(), 0);
+}
+
+#[test]
+fn recording_releases_the_delivered_cell_when_reference_acquisition_panics() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let table = Table::new();
+    let mut cx = Context::default();
+    let backend = cx.register_backend("table", table.clone());
+    let column = cx.column(backend, table.sort());
+    let row = Row::new(&cx, cx.bv_sort(2), [column].into(), 0);
+    let unit = cx.unit_sort().bind(&mut cx);
+    let a = relation(&cx, &row, [(2, 0), (3, 2)]);
+    let mut b = Rel::new(&cx, unit.clone(), row.clone());
+    b.insert(((), 1_u8));
+    let projection = crate::query::project(&cx, &row, [], unit);
+    let query = (&a).select(&projection).select(&b);
+    let refs = table.refs();
+    table.refines.store(0, Ordering::Relaxed);
+    // The left source refines once, then the right source computes its first
+    // sighting. Its second sighting produces a cell before memo acquisition.
+    table.fail_at.store(3, Ordering::Relaxed);
+    let failure = catch_unwind(AssertUnwindSafe(|| {
+        query.drive(&mut |_, _| ControlFlow::<()>::Continue(()))
+    }))
+    .unwrap_err();
+    let text = failure
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| failure.downcast_ref::<&str>().copied())
+        .unwrap();
+    assert!(text.contains("injected reference limit"));
+    assert_eq!(table.refines.load(Ordering::Relaxed), 3);
+    assert_eq!(table.refs(), refs);
+    drop(query);
+    drop(projection);
+    drop(a);
+    drop(b);
+    drop(cx);
+    assert_eq!(table.refs(), 0);
+}
+
+#[test]
+fn callback_replay_distinguishes_cell_roots() {
+    let mut cx = Context::default();
+    let four = bv(&mut cx, 4);
+    let c = relation(&cx, &four, [(0, 10), (1, 11), (2, 12), (3, 13)]);
+    let a = relation(&cx, &four, [(10, 1), (11, 2), (12, 1), (13, 1)]);
+    let b = relation(&cx, &four, [(1, 5), (2, 6)]);
+    // The right source sees the cell roots {1}, {2}, {1}, and {1}: the pair
+    // for {1} is recorded on its second sighting and replayed on its third,
+    // and a key ignoring the cell root would replay the cells of {2}.
+    let query = (&c).select(&a).select(&b);
+    let mut seen = BTreeSet::new();
+    let flow = query.drive(&mut |d, r| {
+        for &x in &members(d) {
+            for &y in &members(r) {
+                seen.insert((x, y));
+            }
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    assert!(flow.is_continue());
+    let expected = [(0, 5), (1, 6), (2, 5), (3, 5)].into();
+    assert_eq!(seen, expected);
+    assert_eq!(pairs(&query.collect()), expected);
+}
+
+#[test]
 fn nested_narrowings_release_roots_on_return_break_and_panic() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
-    use super::{Binding, Mode, Run, Slot, Visit};
+    use super::{Mode, Run, Slot, Visit};
 
     let table = Table::new();
     let mut cx = Context::default();

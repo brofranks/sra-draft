@@ -3,7 +3,8 @@
 //! Pending continuations retain only the endpoint cells they can read.
 //! Collection detaches finalized output cells before memoizing the remaining
 //! computation, so unrelated prefixes share one suffix graph. Callback
-//! traversal follows the same refinements without memoizing caller effects.
+//! traversal follows the same refinements, replaying a recurring refinement
+//! of one source node by one cell root and never memoizing caller effects.
 //! No whole-query source table or field schedule is constructed.
 //!
 //! A map between two cells is an equation active while its operand's
@@ -18,7 +19,7 @@ use std::sync::Arc;
 use crate::backend::{BoolOp, Function, MapSpec, Refinement};
 use crate::context::{ColumnId, Context, Predicate};
 use crate::index::{IndexRoot, Level};
-use crate::partition;
+use crate::partition::{self, Partition};
 use crate::util::dag::{Idx, Map, Set, structural_hash};
 
 /// A boundary cell's column and pending dependency.
@@ -52,6 +53,7 @@ impl<'a> Binding<'a> {
     pub fn predicate(self, i: usize) -> Predicate {
         self.eval.predicate(self.cells[i])
     }
+
     /// The column and current root of the endpoint's cell `i`, borrowed for
     /// the callback's duration: the run holds the reference, so a use that
     /// ends before the callback returns needs no handle of its own.
@@ -522,13 +524,16 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         );
         let mut out = mode.sum();
         let mut scratch = eval.refinement();
-        let flow = source.refine_cells(
+        let flow = mode.refine(
+            memo,
+            source,
             root,
             partition,
             hole,
-            eval.cells[cell].function,
+            cell,
+            eval,
             &mut scratch,
-            |p, child| {
+            |eval, mode, memo, p, child| {
                 let result = eval.narrow(cell, p, mode, |eval, mode| {
                     eval.read(cell, |eval| {
                         walk(source, child, level + 1, map, stop, eval, memo, mode, then)
@@ -587,14 +592,16 @@ impl Exec for IndexRoot {
 
 /// A fold policy for the common traversal.
 ///
-/// Callback mode keeps no state and never touches a memo; collection returns
-/// graph roots and caches only completed suffix computations.
+/// Callback mode accumulates nothing and memoizes only recurring
+/// refinements; collection returns graph roots and caches only completed
+/// suffix computations.
 pub trait Mode: Sized {
     /// The result of one traversal.
     type Output;
     /// The value carried by an early exit.
     type Break;
-    /// Suffix cache state for one source occurrence.
+    /// Cache state for one source occurrence, such as completed suffixes or
+    /// recurring refinements.
     type Memo: Default;
     /// The accumulator over the refinement cells of one level.
     type Sum;
@@ -637,6 +644,37 @@ pub trait Mode: Sized {
         eval: &mut Run<'_>,
         then: impl FnOnce(&mut Run<'_>, &mut Self, &mut Self::Memo) -> Flow<Self>,
     ) -> Flow<Self>;
+
+    /// Refines `cell` by the source level at `root`, passing each nonempty
+    /// cell, one owned reference, and its child to `then`.
+    ///
+    /// The refinement is a function of the node and the cell's current root
+    /// alone, so a mode may answer a repeated pair from a cache instead of
+    /// refining again.
+    #[inline(always)]
+    fn refine(
+        &mut self,
+        memo: &mut Self::Memo,
+        source: &IndexRoot,
+        root: Function,
+        partition: Partition,
+        hole: u32,
+        cell: usize,
+        eval: &mut Run<'_>,
+        scratch: &mut Refinement,
+        mut then: impl FnMut(
+            &mut Run<'_>,
+            &mut Self,
+            &mut Self::Memo,
+            Function,
+            Function,
+        ) -> ControlFlow<Self::Break>,
+    ) -> ControlFlow<Self::Break> {
+        let p = eval.cells[cell].function;
+        source.refine_cells(root, partition, hole, p, scratch, |q, child| {
+            then(eval, self, memo, q, child)
+        })
+    }
 }
 
 /// Callback mode: delivers each accepting branch to `then` as a domain and a
@@ -650,10 +688,36 @@ pub struct Visit<'a, F> {
     pub domain: usize,
 }
 
+/// Refinements of one source occurrence under callback traversal, keyed by
+/// the source node and the incoming cell root.
+///
+/// A walk reaches one node with one cell root once per branch of the sources
+/// before it, and the refinement depends on nothing else, so a recurring pair
+/// replays its recorded cells instead of refining again. Like [`MemoLevel`], a
+/// pair is recorded on its second sighting, so a pair seen once costs neither
+/// retained handles nor an entry.
+///
+/// Each entry retains its key's cell root and its delivered cells, so those
+/// tokens cannot be freed and reused under a key. Source nodes and recorded
+/// children stay live through the source root the walk borrows, which
+/// outlives this per-invocation memo.
+#[derive(Default)]
+pub struct RefineMemo {
+    /// The retained key root and the range of `cells` of each recorded pair.
+    pub entries: Map<(usize, usize), (Predicate, Range<usize>)>,
+    /// The delivered cell and child pairs, one contiguous range per entry.
+    pub cells: Vec<(Predicate, Function)>,
+    /// The pairs of the entries being recorded, deeper levels above
+    /// shallower ones, moved into `cells` when their level completes.
+    pub pending: Vec<(Predicate, Function)>,
+    /// The keys refined so far.
+    pub seen: Set<(usize, usize)>,
+}
+
 impl<B, F: for<'a> FnMut(Binding<'a>, Binding<'a>) -> ControlFlow<B>> Mode for Visit<'_, F> {
     type Output = ();
     type Break = B;
-    type Memo = ();
+    type Memo = RefineMemo;
     type Sum = ();
     #[inline(always)]
     fn sum(&mut self) {}
@@ -686,13 +750,63 @@ impl<B, F: for<'a> FnMut(Binding<'a>, Binding<'a>) -> ControlFlow<B>> Mode for V
     #[inline(always)]
     fn level(
         &mut self,
-        memo: &mut (),
+        memo: &mut RefineMemo,
         _: Function,
         _: usize,
         eval: &mut Run<'_>,
-        then: impl FnOnce(&mut Run<'_>, &mut Self, &mut ()) -> ControlFlow<B>,
+        then: impl FnOnce(&mut Run<'_>, &mut Self, &mut RefineMemo) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         then(eval, self, memo)
+    }
+    #[inline(always)]
+    fn refine(
+        &mut self,
+        memo: &mut RefineMemo,
+        source: &IndexRoot,
+        root: Function,
+        partition: Partition,
+        hole: u32,
+        cell: usize,
+        eval: &mut Run<'_>,
+        scratch: &mut Refinement,
+        mut then: impl FnMut(
+            &mut Run<'_>,
+            &mut Self,
+            &mut RefineMemo,
+            Function,
+            Function,
+        ) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        let (column, p) = eval.root(cell);
+        let key = (root.index(), p.index());
+        if let Some((_, range)) = memo.entries.get(&key) {
+            for i in range.clone() {
+                let (q, child) = (memo.cells[i].0.function(), memo.cells[i].1);
+                // The memo keeps its own reference. Narrowing consumes one.
+                partition::inc_ref(eval.cx, column, q);
+                then(eval, self, memo, q, child)?;
+            }
+            return ControlFlow::Continue(());
+        }
+        if memo.seen.insert(key) {
+            return source.refine_cells(root, partition, hole, p, scratch, |q, child| {
+                then(eval, self, memo, q, child)
+            });
+        }
+        let cx = eval.cx;
+        let held = cx.predicate(column, p);
+        let mark = memo.pending.len();
+        source.refine_cells(root, partition, hole, p, scratch, |q, child| {
+            memo.pending.push((cx.adopt(column, q), child));
+            partition::inc_ref(cx, column, q);
+            then(eval, self, memo, q, child)
+        })?;
+        // Only a completed delivery is a whole refinement. A break ends the
+        // whole traversal, which drops this per-invocation memo.
+        let start = memo.cells.len();
+        memo.cells.extend(memo.pending.drain(mark..));
+        memo.entries.insert(key, (held, start..memo.cells.len()));
+        ControlFlow::Continue(())
     }
 }
 
