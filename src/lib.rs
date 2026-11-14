@@ -9,4 +9,6 @@ mod backend;
 #[allow(dead_code)]
 mod bdd;
 #[allow(dead_code)]
+mod context;
+#[allow(dead_code)]
 mod scalar;
