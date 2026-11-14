@@ -622,24 +622,6 @@ impl IntoRow for () {
     }
 }
 
-// Whether a tuple supplies exactly the fields of a record with members
-// `parts`, each element matching one member's normalized components.
-macro_rules! record_fields {
-    ($args:expr, $cx:expr, $parts:expr, $n:literal, $($i:tt)+) => {{
-        let parts: &[Sort] = $parts;
-        parts.len() == $n && true $(&& {
-            let members;
-            let fields = if parts[$i].kind == SortKind::Product {
-                members = $cx.members(parts[$i]);
-                members.as_slice()
-            } else {
-                std::slice::from_ref(&parts[$i])
-            };
-            $args.$i.span($cx, fields) == Some(fields.len())
-        })+
-    }};
-}
-
 macro_rules! tuple_args {
     ($($n:literal: $($t:ident $i:tt),+);+ $(;)?) => {$(
         impl<$($t: IntoRow),+> IntoRow for ($($t,)+) {
@@ -652,26 +634,44 @@ macro_rules! tuple_args {
 
             fn span(&self, cx: &Context, sorts: &[Sort]) -> Option<usize> {
                 let first = sorts.first().filter(|sort| sort.kind == SortKind::Tuple);
+                // Whether the tuple supplies exactly the record's fields, each
+                // element matching one member's normalized components.
                 let record = first.is_some_and(|sort| {
-                    record_fields!(self, cx, &cx.members(*sort), $n, $($i)+)
+                    let parts = cx.members(*sort);
+                    parts.len() == $n && true $(&& {
+                        let members;
+                        let fields = if parts[$i].kind == SortKind::Product {
+                            members = cx.members(parts[$i]);
+                            members.as_slice()
+                        } else {
+                            std::slice::from_ref(&parts[$i])
+                        };
+                        self.$i.span(cx, fields) == Some(fields.len())
+                    })+
                 });
                 if record {
                     Some(1)
                 } else {
                     let mut start = 0;
                     $(start += self.$i.span(cx, &sorts[start..])?;)+
-                    Some(start)
+                    // A group covering exactly one record must be that record's
+                    // value, because `append` takes the member path otherwise.
+                    (start != 1 || first.is_none() || self.record_sort(cx) == first.copied())
+                        .then_some(start)
                 }
             }
 
             #[inline(always)]
             fn append(&self, row: RowRef<'_>, out: &mut impl RowSink) {
-                // Take the member path exactly when `span` matched the record's
-                // fields; a wrapped record value falls through to its group.
-                if row.sort.kind == SortKind::Tuple
-                    && self.record_sort(row.cx) != Some(row.sort)
-                    && record_fields!(self, row.cx, row.members, $n, $($i)+)
-                {
+                // A record destination takes its members from the tuple unless the
+                // tuple wraps a value of that record, which falls through to its group.
+                if row.sort.kind == SortKind::Tuple && self.record_sort(row.cx) != Some(row.sort) {
+                    assert_eq!(row.members.len(), $n, "row arguments have the wrong member count");
+                    assert_eq!(
+                        self.span(row.cx, std::slice::from_ref(&row.sort)),
+                        Some(1),
+                        "row arguments must match the destination members"
+                    );
                     let mut offset = 0;
                     $({
                         let sort = row.members[$i];

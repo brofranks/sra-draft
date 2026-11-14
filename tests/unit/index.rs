@@ -908,13 +908,27 @@ fn apply_bool_restarts_its_memo_on_another_container() {
     let mut cx = Context::default();
     let (a, b) = (column(&mut cx, "sparse", 4), column(&mut cx, "bdd", 4));
     let (one, two) = (intern(&cx, &[a]), intern(&cx, &[b]));
-    let x = at(&one, 0, &[1], &[&t(&one)]);
-    let y = at(&one, 0, &[2], &[&t(&one)]);
-    let _memoized = one.apply_bool(BoolOp::Or, x.function, y.function);
-    // The same tokens in another container mean other rows.
     let u = at(&two, 0, &[5], &[&t(&two)]);
     let v = at(&two, 0, &[6], &[&t(&two)]);
-    assert_eq!((u.function, v.function), (x.function, y.function));
+    // Seed a stale entry under this container's actual normalized operand key.
+    // Matching the epoch and staying within the bound isolates container
+    // invalidation from the other reasons restart clears the memo.
+    SCRATCH.with_borrow_mut(|s| {
+        s.memo.clear();
+        s.memo.insert(
+            (
+                BoolOp::Or,
+                u.function.min(v.function),
+                u.function.max(v.function),
+            ),
+            Function::FALSE,
+        );
+        s.container = one.data.shared.id;
+        s.epoch = two.data.shared.epoch();
+        s.bound = 1;
+        assert_ne!(s.container, two.data.shared.id);
+        assert!(s.memo.len() <= s.bound);
+    });
     let w = two.apply_bool(BoolOp::Or, u.function, v.function);
     assert_eq!(ground(&w), BTreeSet::from([vec![5], vec![6]]));
 }

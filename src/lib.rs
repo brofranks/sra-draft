@@ -17,6 +17,8 @@ mod index;
 #[allow(dead_code)]
 mod partition;
 #[allow(dead_code)]
+mod rel;
+#[allow(dead_code)]
 mod row;
 #[allow(dead_code)]
 mod scalar;

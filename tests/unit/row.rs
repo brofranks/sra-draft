@@ -709,7 +709,7 @@ fn a_nested_group_span_failure_is_rejected() {
 }
 
 #[test]
-#[should_panic(expected = "row arguments must match the destination members")]
+#[should_panic(expected = "row arguments have the wrong member count")]
 fn extra_record_arguments_are_rejected() {
     let mut cx = Context::default();
     let t = cx.tuple_decl("T", [("a", cx.bv_sort(4)), ("b", cx.bv_sort(4))]);
@@ -718,16 +718,100 @@ fn extra_record_arguments_are_rejected() {
 }
 
 #[test]
-fn wrapped_record_values_fill_the_record() {
+fn record_fields_require_complete_spans_directly_and_when_nested() {
+    fn check<A: IntoRow + Clone>(
+        cx: &Context,
+        direct: &Row,
+        binary: &Row,
+        nested: &Row,
+        arg: A,
+        leading: bool,
+    ) {
+        assert!(catch_unwind(AssertUnwindSafe(|| symbolic(cx, direct, (arg.clone(),)))).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| symbolic(
+                cx,
+                binary,
+                ((arg.clone(),), 0_u8)
+            )))
+            .is_err()
+        );
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| symbolic(cx, nested, ((arg.clone(),),)))).is_err()
+        );
+        if leading {
+            assert_eq!(
+                symbolic(cx, direct, (((), arg.clone()),)),
+                (vec![0], vec![0])
+            );
+            assert_eq!(
+                symbolic(cx, binary, ((((), arg.clone()),), 0_u8)),
+                (vec![0, 0], vec![0])
+            );
+            assert_eq!(symbolic(cx, nested, ((((), arg),),)), (vec![0], vec![0]));
+        } else {
+            assert_eq!(
+                symbolic(cx, direct, ((arg.clone(), ()),)),
+                (vec![0], vec![0])
+            );
+            assert_eq!(
+                symbolic(cx, binary, (((arg.clone(), ()),), 0_u8)),
+                (vec![0, 0], vec![0])
+            );
+            assert_eq!(symbolic(cx, nested, (((arg, ()),),)), (vec![0], vec![0]));
+        }
+    }
+
+    for backend in ["bdd", "sparse"] {
+        for leading in [false, true] {
+            let mut cx = Context::default();
+            let bits = cx.bv_sort(1);
+            let empty = cx.tuple_decl("Empty", [] as [(&str, Sort); 0]).sort;
+            let field = cx.product_sort(if leading {
+                [empty, bits]
+            } else {
+                [bits, empty]
+            });
+            let r = cx.tuple_decl("Record", [("field", field)]).sort;
+            let outer = cx.tuple_decl("Outer", [("record", r)]).sort;
+            let direct = r.bind(&mut cx);
+            let binary = cx.product_sort([r, bits]).bind(&mut cx);
+            let nested = outer.bind(&mut cx);
+            let b = cx.backend(backend);
+            let c = cx.column(b, bits.scalar());
+            // Whole-field predicate arrays use the field's actual backend.
+            let replace = |row: Row| {
+                let mut layout = row.layout.to_vec();
+                layout[0] = c;
+                Row::new(&cx, row.sort, layout.into(), row.start)
+            };
+            let (direct, binary, nested) = (replace(direct), replace(binary), replace(nested));
+            let p = cx.set(c, &[0]);
+            let owned = [p.clone()];
+            let borrowed = [&p];
+            check(&cx, &direct, &binary, &nested, owned.clone(), leading);
+            check(&cx, &direct, &binary, &nested, borrowed, leading);
+            check(&cx, &direct, &binary, &nested, owned.as_slice(), leading);
+            check(&cx, &direct, &binary, &nested, borrowed.as_slice(), leading);
+        }
+    }
+}
+
+#[test]
+fn record_destinations_take_their_members() {
     let mut cx = Context::default();
     let n = cx.bv_sort(4);
     let t = cx.tuple_decl("T", [("a", n), ("b", n)]).sort;
     let r = t.bind(&mut cx);
-    // A singleton tuple around the record's fields and a trailing unit are
-    // anonymous groups around one record value.
-    assert_eq!(words(&cx, &r, ((1_u8, 2_u8),)), [1, 2]);
-    assert_eq!(words(&cx, &r, ((1_u8, 2_u8), ())), [1, 2]);
+    let p = cx.product_sort([t, n]).bind(&mut cx);
     assert_eq!(words(&cx, &r, (1_u8, 2_u8)), [1, 2]);
+    // A tuple aimed at a record supplies its members, so a singleton or
+    // unit-padded group around the fields is rejected by `span` and `append`.
+    let fails = |f: &dyn Fn()| catch_unwind(AssertUnwindSafe(f)).is_err();
+    assert!(fails(&|| drop(words(&cx, &r, ((1_u8, 2_u8),)))));
+    assert!(fails(&|| drop(words(&cx, &r, ((1_u8, 2_u8), ())))));
+    assert!(fails(&|| drop(words(&cx, &p, (((1_u8, 2_u8),), 3_u8)))));
+    assert!(fails(&|| drop(words(&cx, &p, (((1_u8, 2_u8), ()), 3_u8)))));
 }
 
 #[test]
