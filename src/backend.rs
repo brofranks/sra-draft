@@ -529,6 +529,16 @@ pub trait Column: Send + Sync {
     /// external and internal owners release them.
     fn dec_ref(&self, f: Function);
 
+    /// Releases one external reference to each function in `fs`.
+    ///
+    /// Index collection releases every partition reclaimed at one level through
+    /// one call, so a store may take its guard once for the whole batch.
+    fn dec_refs(&self, fs: &[Function]) {
+        for &f in fs {
+            self.dec_ref(f);
+        }
+    }
+
     /// The value of `f` at one valid domain value: a predicate's zero/one or a
     /// partition's slot number.
     ///

@@ -1016,6 +1016,16 @@ impl Column for BddColumn {
         }
     }
 
+    /// Releases one external reference to each function under one guard.
+    fn dec_refs(&self, fs: &[Function]) {
+        let state = self.store.shared.read(self.store.threads);
+        for &f in fs {
+            if !f.is_constant() {
+                state.dec_ref(f);
+            }
+        }
+    }
+
     /// The terminal of `f` at one value of the bound sort.
     fn evaluate(&self, mut f: Function, value: &[u64]) -> u32 {
         let span = self.span;

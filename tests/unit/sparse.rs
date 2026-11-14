@@ -62,6 +62,24 @@ fn roomy() -> Arc<SparseTable> {
     Arc::new(SparseTable::default())
 }
 
+/// A backend binding every column to one observed table.
+struct SharedTable(Arc<SparseTable>);
+
+impl Backend for SharedTable {
+    fn column(self: Arc<Self>, sort: ScalarSort) -> Option<Box<dyn Column>> {
+        Arc::clone(&self.0).column(sort)
+    }
+}
+
+/// The number of live referenced nodes in a table.
+fn referenced(store: &SparseTable) -> usize {
+    let state = store.shared.read(store.threads);
+    (0..state.node_capacity())
+        .map(Function::new)
+        .filter(|&f| state.get(f).is_some() && state.has_refs(f))
+        .count()
+}
+
 /// The table bound to one sort.
 fn col(store: &Arc<SparseTable>, d: ScalarSort) -> Box<dyn Column> {
     Arc::clone(store).column(d).unwrap()
@@ -181,6 +199,181 @@ fn repeated_bindings_share_live_roots() {
     a.dec_ref(q);
     b.dec_ref(r);
     a.dec_ref(s);
+}
+
+#[test]
+fn dec_refs_releases_every_root_once() {
+    let store = tiny();
+    let c = col(&store, BV4);
+    let (p, q) = (c.set(&[1, 3]), c.set(&[2]));
+    c.inc_ref(p);
+    // One batch releases one reference per entry; constants are skipped and
+    // the second reference keeps `p` live.
+    c.dec_refs(&[p, q, Function::TRUE, Function::FALSE, p]);
+    let state = store.shared.read(store.threads);
+    assert!(!state.has_refs(p) && !state.has_refs(q));
+}
+
+#[test]
+fn outer_collection_releases_only_reclaimed_nodes_partitions() {
+    use crate::context::Context;
+    use crate::index::{Labels, Level, intern};
+    use crate::util::dag::Idx;
+
+    let store = roomy();
+    let mut cx = Context::default();
+    let backend = cx.register_backend("observed", SharedTable(Arc::clone(&store)));
+    let column = cx.column(backend, BV32);
+    let idx = intern(&cx, &[column]);
+    let mut labels = Labels::default();
+    let node = idx.values(Level::new(0), &[1], &[Function::TRUE], &mut labels);
+    let p = idx.head(node.function).1.function;
+    // Every node holds one reference to its partition. Dropping its root
+    // leaves the node published until outer collection releases that reference.
+    drop(node);
+    let kept = idx.values(Level::new(0), &[7], &[Function::TRUE], &mut labels);
+    let q = idx.head(kept.function).1.function;
+    let data = cx.layouts.lock().unwrap()[0].clone();
+    let mut first = true;
+    data.shared.retry((&cx, &data.columns), |_| {
+        if first {
+            first = false;
+            Err(NeedGrowth::Nodes)
+        } else {
+            Ok(())
+        }
+    });
+    {
+        let state = store.shared.read(store.threads);
+        assert!(!state.has_refs(p));
+        assert!(state.has_refs(q));
+    }
+    // Inspect ownership before backend collection can recycle either token,
+    // then check that only the unreferenced partition is reclaimed.
+    collect(&store);
+    {
+        let state = store.shared.read(store.threads);
+        assert!(state.get(p).is_none());
+        assert!(state.has_refs(q));
+    }
+    assert!(kept.contains(&[7]) && !kept.contains(&[1]));
+}
+
+#[test]
+fn context_teardown_releases_index_partitions() {
+    use crate::context::Context;
+    use crate::index::{Labels, Level, intern};
+    use crate::util::dag::Idx;
+
+    let store = roomy();
+    let p = {
+        let mut cx = Context::default();
+        let backend = cx.register_backend("observed", SharedTable(Arc::clone(&store)));
+        let column = cx.column(backend, BV32);
+        let idx = intern(&cx, &[column]);
+        // Dropping every root leaves the node published until collection, so
+        // the context releases its partition at teardown.
+        let node = idx.values(
+            Level::new(0),
+            &[1],
+            &[Function::TRUE],
+            &mut Labels::default(),
+        );
+        idx.head(node.function).1.function
+    };
+    let state = store.shared.read(store.threads);
+    assert!(state.get(p).is_some() && !state.has_refs(p));
+}
+
+#[test]
+fn index_retries_release_every_partition_reference() {
+    use std::collections::BTreeSet;
+
+    use crate::context::Context;
+    use crate::index::{IndexData, IndexNode, IndexRoot, Labels, Level, State, intern};
+    use crate::util::dag::{Idx, Shared};
+
+    /// A referenced root holding exactly the sorted, distinct `rows`.
+    fn build(index: &IndexRoot, level: usize, rows: &[Vec<u64>], labels: &mut Labels) -> IndexRoot {
+        if rows.is_empty() {
+            return index.inc_ref(Function::FALSE);
+        }
+        if level == index.arity() {
+            return index.inc_ref(Function::TRUE);
+        }
+        let (mut keys, mut children) = (Vec::new(), Vec::new());
+        for group in rows.chunk_by(|x, y| x[level] == y[level]) {
+            keys.push(group[0][level]);
+            children.push(build(index, level + 1, group, labels));
+        }
+        let conts: Vec<_> = children.iter().map(|c| c.function).collect();
+        index.values(Level::new(level), &keys, &conts, labels)
+    }
+
+    let store = roomy();
+    let mut cx = Context::default();
+    let backend = cx.register_backend("observed", SharedTable(Arc::clone(&store)));
+    let columns: Vec<_> = (0..3).map(|_| cx.column(backend, BV4)).collect();
+    // A tiny container fails interning at every depth, so operations retry
+    // after releasing their frames' partitions.
+    cx.layouts.lock().unwrap().push(Arc::new(IndexData {
+        columns: columns.as_slice().into(),
+        shared: Shared::new(State::with_capacity(
+            4,
+            4,
+            (0..2).map(|_| IndexNode {
+                level: Level::TERMINAL,
+                partition: Function::FALSE,
+                hole: u32::MAX,
+            }),
+        )),
+    }));
+    let base = referenced(&store);
+    let idx = intern(&cx, &columns);
+    let mut labels = Labels::default();
+    let mut seed = 7_u64;
+    let mut next = move |n: u64| {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (seed >> 33) % n
+    };
+    let mut held = Vec::new();
+    for _ in 0..40 {
+        let mut sets: [BTreeSet<Vec<u64>>; 2] = Default::default();
+        for set in &mut sets {
+            for _ in 0..next(30) {
+                set.insert(vec![next(16), next(16), next(16)]);
+            }
+        }
+        let [l, r] = sets.each_ref().map(|set| {
+            build(
+                &idx,
+                0,
+                &set.iter().cloned().collect::<Vec<_>>(),
+                &mut labels,
+            )
+        });
+        for op in [BoolOp::And, BoolOp::Or, BoolOp::Xor, BoolOp::AndNot] {
+            held.push(idx.apply_bool(op, l.function, r.function));
+        }
+        held.push(l.min_at(Level::new(1)));
+        held.extend([l, r]);
+    }
+    let data = cx.layouts.lock().unwrap()[0].clone();
+    assert!(data.shared.epoch() > 0, "the container was maintained");
+    drop(held);
+    let mut first = true;
+    data.shared.retry((&cx, &data.columns), |_| {
+        if first {
+            first = false;
+            Err(NeedGrowth::Nodes)
+        } else {
+            Ok(())
+        }
+    });
+    collect(&store);
+    assert_eq!(referenced(&store), base);
 }
 
 #[test]

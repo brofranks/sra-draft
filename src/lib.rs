@@ -13,6 +13,10 @@ mod bdd;
 #[allow(dead_code)]
 mod context;
 #[allow(dead_code)]
+mod index;
+#[allow(dead_code)]
+mod partition;
+#[allow(dead_code)]
 mod row;
 #[allow(dead_code)]
 mod scalar;

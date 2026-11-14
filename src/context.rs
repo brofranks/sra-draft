@@ -14,7 +14,7 @@ use std::any::Any;
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::mem::ManuallyDrop;
+use std::mem::{self, ManuallyDrop};
 use std::ops::Deref;
 use std::ptr;
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use crate::ast::{AstId, AstStore, FuncDecl, NodeKind, Sort, SortKind};
 use crate::backend::{Backend, BoolOp, Column, Function};
 use crate::bdd::BddStore;
+use crate::index::{IndexData, dec_partition_refs};
 use crate::scalar::{self, ScalarSort};
 use crate::sparse::SparseTable;
 use crate::util::fresh_id;
@@ -140,6 +141,8 @@ pub struct ContextData {
     fields: HashMap<AstId, ColumnId>,
     /// The lazily allocated value dictionary of each symbol sort.
     interners: Mutex<HashMap<AstId, Arc<dyn Any + Send + Sync>>>,
+    /// The index container of each exact column list, interned on first use.
+    pub layouts: Mutex<Vec<Arc<IndexData>>>,
     // Declared first so columns drop before the backends they bind.
     columns: Vec<(usize, Box<dyn Column>)>,
     backends: Vec<(Box<str>, Arc<dyn Backend>)>,
@@ -172,6 +175,19 @@ impl ContextData {
             "column belongs to another context"
         );
         &*self.columns[column.slot].1
+    }
+}
+
+impl Drop for ContextData {
+    /// Releases the partition references every index container owns before
+    /// the columns they live in drop.
+    fn drop(&mut self) {
+        for data in mem::take(self.layouts.get_mut().unwrap()) {
+            let mut data = Arc::try_unwrap(data)
+                .ok()
+                .expect("index data must not outlive its context");
+            dec_partition_refs(&mut data, self);
+        }
     }
 }
 
@@ -256,7 +272,7 @@ pub struct Context {
 }
 
 /// Checks that `values` are sorted, distinct, and encoded in `sort`.
-fn check_packed(sort: ScalarSort, values: &[u64]) {
+pub fn check_packed(sort: ScalarSort, values: &[u64]) {
     let words = sort.words();
     assert!(
         values.len().is_multiple_of(words),
@@ -283,6 +299,7 @@ impl Context {
                 ast: AstStore::default(),
                 fields: HashMap::new(),
                 interners: Mutex::default(),
+                layouts: Mutex::default(),
                 columns: Vec::new(),
                 backends: Vec::new(),
             }),

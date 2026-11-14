@@ -539,6 +539,16 @@ impl<L: Layout> Column for SparseColumn<L> {
         }
     }
 
+    /// Releases one external reference to each function under one guard.
+    fn dec_refs(&self, fs: &[Function]) {
+        let state = self.store.shared.read(self.store.threads);
+        for &f in fs {
+            if !f.is_constant() {
+                state.dec_ref(f);
+            }
+        }
+    }
+
     /// The payload of the run holding `value`.
     fn evaluate(&self, f: Function, value: &[u64]) -> u32 {
         let l = self.l;

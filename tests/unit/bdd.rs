@@ -223,6 +223,19 @@ fn repeated_bindings_share_live_roots() {
 }
 
 #[test]
+fn dec_refs_releases_every_root_once() {
+    let store = tiny();
+    let c = col(&store, BV4);
+    let (p, q) = (c.set(&[1, 3]), c.set(&[2]));
+    c.inc_ref(p);
+    // One batch releases one reference per entry; constants are skipped and
+    // the second reference keeps `p` live.
+    c.dec_refs(&[p, q, Function::TRUE, Function::FALSE, p]);
+    let state = store.shared.read(store.threads);
+    assert!(!state.has_refs(p) && !state.has_refs(q));
+}
+
+#[test]
 fn a_column_retains_the_store_and_roots_from_another_binding() {
     let store = tiny();
     let a = col(&store, BV12);
