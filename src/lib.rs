@@ -5,8 +5,9 @@
 //! [`context`] the sorts, declarations, and store registry, [`row`],
 //! [`partition`], and [`index`] the stored shape of a relation, and [`rel`],
 //! [`query`], and [`run`] the relations, combinators, and their execution,
-//! [`pred`] the field predicates that restrict them, and [`iteration`] the
-//! semi-naive fixed points over them.
+//! [`pred`] the field predicates that restrict them, [`iteration`] the
+//! semi-naive fixed points over them, and [`typed`] the Rust endpoint
+//! interpretations over all of it.
 #![warn(missing_docs)]
 
 #[macro_use]
@@ -27,6 +28,7 @@ pub mod row;
 pub mod run;
 pub mod scalar;
 pub mod sparse;
+pub mod typed;
 
 pub use ast::{FuncDecl, FuncInfo, Sort, SortKind, TupleDecl};
 pub use backend::{Backend, BoolOp, Column, Function, MapSpec, Members};
