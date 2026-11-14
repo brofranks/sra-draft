@@ -12,3 +12,5 @@ mod bdd;
 mod context;
 #[allow(dead_code)]
 mod scalar;
+#[allow(dead_code)]
+mod sparse;

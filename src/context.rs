@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::backend::{Backend, BoolOp, Column, Function};
 use crate::bdd::BddStore;
 use crate::scalar::{self, ScalarSort};
+use crate::sparse::SparseTable;
 use crate::util::fresh_id;
 
 /// One registered backend of one context.
@@ -362,9 +363,11 @@ impl Context {
 }
 
 impl Default for Context {
-    /// Creates a context with a default [`BddStore`] registered as `bdd`.
+    /// Creates a context with a default [`SparseTable`] registered as `sparse`
+    /// and a default [`BddStore`] registered as `bdd`.
     fn default() -> Self {
         let mut cx = Self::new();
+        cx.register_backend("sparse", SparseTable::default());
         cx.register_backend("bdd", BddStore::default());
         cx
     }

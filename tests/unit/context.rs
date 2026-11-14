@@ -3,17 +3,25 @@
 //!
 //! Most checks build a context through `cx()`, which registers a BDD store as
 //! `bdd` with a 2-node arena, so nonconstant constructions also exercise arena
-//! growth. `bv` declares bit-vector columns on it, `members` enumerates a 4-bit
-//! predicate, and `release_sole_reference` checks that a predicate owns exactly
-//! one root reference.
+//! growth. `bv` declares bit-vector columns on it, `below` enumerates a
+//! one-word predicate below a bound, and `release_sole_reference` checks that a
+//! predicate owns exactly one root reference.
+//!
+//! The sparse and BDD agreement checks build a context through `both()`, which
+//! registers a tiny sparse table and a tiny BDD store, so both collect and
+//! grow. `pair` declares one column of a sort on each, and `slots` reads the
+//! slot of every value. The checks compare the two backends against each other
+//! and against plain arithmetic.
 
+use std::ops::ControlFlow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use super::{Context, Predicate};
-use crate::backend::{Backend, BoolOp, Column};
+use crate::backend::{Alignment, Backend, BoolOp, Column, Function, Refinement, Values};
 use crate::bdd::BddStore;
 use crate::scalar::ScalarSort;
+use crate::sparse::SparseTable;
 
 const BV4: ScalarSort = ScalarSort::bit_vec(4);
 const BV12: ScalarSort = ScalarSort::bit_vec(12);
@@ -38,8 +46,9 @@ fn bv(cx: &mut Context, width: u32) -> super::ColumnId {
     cx.column(bdd, ScalarSort::bit_vec(width))
 }
 
-fn members(p: &Predicate) -> Vec<u64> {
-    (0..16).filter(|v| p.contains(&[*v])).collect()
+/// The members of a one-word predicate below `size`.
+fn below(p: &Predicate, size: u64) -> Vec<u64> {
+    (0..size).filter(|v| p.contains(&[*v])).collect()
 }
 
 /// Releases the one reference `p` owns, checking that no further one remains.
@@ -50,7 +59,7 @@ fn release_sole_reference(p: Predicate) {
     assert!(again.is_err(), "predicate owned more than one reference");
 }
 
-// --- registration and resolution --------------------------------------------
+// --- registration and resolution ---------------------------------------------
 
 #[test]
 fn backends_register_under_unique_names() {
@@ -83,7 +92,7 @@ fn a_duplicate_backend_name_is_rejected() {
     cx().register_backend("bdd", Nothing);
 }
 
-// --- columns ----------------------------------------------------------------
+// --- columns -----------------------------------------------------------------
 
 #[test]
 fn repeated_declarations_intern_one_column() {
@@ -121,7 +130,7 @@ fn declaring_a_column_on_a_shared_context_is_rejected() {
     bv(&mut cx, 12);
 }
 
-// --- constructors -----------------------------------------------------------
+// --- constructors ------------------------------------------------------------
 
 #[test]
 fn constants_need_no_references() {
@@ -192,7 +201,7 @@ fn a_masked_value_outside_its_mask_is_rejected() {
     cx.masked_eq(c, &[1], &[3]);
 }
 
-// --- Boolean operations -----------------------------------------------------
+// --- Boolean operations ------------------------------------------------------
 
 #[test]
 fn boolean_operations_and_ite_adopt_fresh_references() {
@@ -201,23 +210,26 @@ fn boolean_operations_and_ite_adopt_fresh_references() {
     let low = cx.less_than(c, &[6]);
     let odd = cx.masked_eq(c, &[1], &[1]);
     let picked = cx.set(c, &[2, 7, 9]);
-    assert_eq!(members(&low), [0, 1, 2, 3, 4, 5]);
-    assert_eq!(members(&odd), [1, 3, 5, 7, 9, 11, 13, 15]);
-    assert_eq!(members(&cx.apply_bool(BoolOp::And, &low, &odd)), [1, 3, 5]);
+    assert_eq!(below(&low, 16), [0, 1, 2, 3, 4, 5]);
+    assert_eq!(below(&odd, 16), [1, 3, 5, 7, 9, 11, 13, 15]);
     assert_eq!(
-        members(&cx.apply_bool(BoolOp::AndNot, &low, &odd)),
+        below(&cx.apply_bool(BoolOp::And, &low, &odd), 16),
+        [1, 3, 5]
+    );
+    assert_eq!(
+        below(&cx.apply_bool(BoolOp::AndNot, &low, &odd), 16),
         [0, 2, 4]
     );
     assert_eq!(
-        members(&cx.apply_bool(BoolOp::Xor, &picked, &odd)),
+        below(&cx.apply_bool(BoolOp::Xor, &picked, &odd), 16),
         [1, 2, 3, 5, 11, 13, 15]
     );
-    assert_eq!(members(&cx.ite(&low, &odd, &picked)), [1, 3, 5, 7, 9]);
+    assert_eq!(below(&cx.ite(&low, &odd, &picked), 16), [1, 3, 5, 7, 9]);
     release_sole_reference(cx.apply_bool(BoolOp::And, &low, &odd));
     release_sole_reference(cx.ite(&low, &odd, &picked));
     drop((low, odd, picked));
     let p = cx.set(c, &[2, 7, 9]);
-    assert_eq!(members(&p), [2, 7, 9]);
+    assert_eq!(below(&p, 16), [2, 7, 9]);
 }
 
 #[test]
@@ -352,4 +364,159 @@ fn clone_and_drop_balance_one_reference() {
     drop(q);
     assert_eq!(cx.resolve(c).evaluate(f, &[3]), 1);
     release_sole_reference(cx.adopt(c, f));
+}
+
+// --- default backends and backend agreement ----------------------------------
+
+#[test]
+fn the_default_context_registers_sparse_before_bdd() {
+    let mut cx = Context::default();
+    let (sparse, bdd) = (cx.backend("sparse"), cx.backend("bdd"));
+    assert_eq!((sparse.slot, bdd.slot), (0, 1));
+    for sort in [
+        BV4,
+        ScalarSort::bool(),
+        ScalarSort::bit_vec(70),
+        ScalarSort::symbol(),
+    ] {
+        for backend in [sparse, bdd] {
+            let column = cx.column(backend, sort);
+            assert_eq!(cx.resolve(column).sort(), sort);
+        }
+    }
+}
+
+/// A context with a tiny sparse table and a tiny BDD store, so both backends
+/// collect and grow under the same constructions.
+fn both() -> Context {
+    let mut cx = Context::new();
+    cx.register_backend("sparse", SparseTable::with_capacity(2, 0, 1));
+    cx.register_backend("bdd", BddStore::with_capacity(2, 0, 1));
+    cx
+}
+
+/// The sparse and BDD columns of one sort.
+fn pair(cx: &mut Context, sort: ScalarSort) -> [super::ColumnId; 2] {
+    ["sparse", "bdd"].map(|name| {
+        let backend = cx.backend(name);
+        cx.column(backend, sort)
+    })
+}
+
+#[test]
+fn both_backends_agree_on_boolean_predicates() {
+    let mut cx = both();
+    for (sort, size) in [(BV4, 16), (BV12, 4096)] {
+        let columns = pair(&mut cx, sort);
+        let results = columns.map(|c| {
+            let a = cx.set(c, &(0..size).filter(|v| v % 5 < 2).collect::<Vec<_>>());
+            let b = cx.set(c, &(0..size).filter(|v| v % 7 < 3).collect::<Vec<_>>());
+            let k = cx.less_than(c, &[size * 2 / 3]);
+            let mut out = vec![cx.ite(&k, &a, &b)];
+            out.extend(
+                [BoolOp::And, BoolOp::Or, BoolOp::Xor, BoolOp::AndNot]
+                    .map(|op| cx.apply_bool(op, &a, &b)),
+            );
+            out.push(cx.apply_bool(BoolOp::AndNot, &cx.t(c), &k));
+            out
+        });
+        for (p, q) in results[0].iter().zip(&results[1]) {
+            let (sc, bc) = (cx.resolve(columns[0]), cx.resolve(columns[1]));
+            assert_eq!(below(p, size), below(q, size));
+            assert_eq!(sc.count(p.function()), bc.count(q.function()));
+            let rows = [(sc, p), (bc, q)].map(|(d, r)| {
+                let mut cursor = d.members(r.function());
+                let (mut out, mut v) = (Vec::new(), Vec::new());
+                while cursor.next(&mut v) {
+                    out.push(v[0]);
+                }
+                out
+            });
+            assert_eq!(rows[0], rows[1]);
+            assert_eq!(rows[0], below(p, size));
+        }
+    }
+}
+
+/// The slot of every value of a one-word sort below `size`.
+fn slots(c: &dyn Column, f: Function, size: u64) -> Vec<u32> {
+    (0..size).map(|x| c.evaluate(f, &[x])).collect()
+}
+
+#[test]
+fn both_backends_agree_on_partition_slots() {
+    let mut cx = both();
+    for (sort, size) in [(BV4, 16), (BV12, 4096)] {
+        let results = pair(&mut cx, sort).map(|column| {
+            let c = cx.resolve(column);
+            let residue = |n: u64| -> Vec<(Function, u32)> {
+                (1..n)
+                    .map(|r| {
+                        let values: Vec<u64> = (0..size).filter(|v| v % n == r).collect();
+                        (c.set(&values), r as u32)
+                    })
+                    .collect()
+            };
+            let mut labels = Vec::new();
+            let f = c.cases(0, &residue(3), &mut labels);
+            assert_eq!(labels, [0, 1, 2]);
+            let g = c.cases(0, &residue(2), &mut labels);
+            let keys: Vec<u64> = (1..size).step_by(3).collect();
+            let case_labels: Vec<u32> = keys.iter().map(|k| 20 + (k % 4) as u32).collect();
+            let mut value_labels = Vec::new();
+            let v = c.values(
+                9,
+                &keys,
+                &case_labels,
+                &mut value_labels,
+                &mut Values::default(),
+            );
+            let mut pairs = Vec::new();
+            let mut scratch = Alignment::default();
+            let h = c.align(f, g, &mut pairs, &mut scratch);
+            let q = c.quotient(f, &[0, 1, 0], &mut scratch);
+            let p = c.set(&(0..size).filter(|v| v % 5 == 1).collect::<Vec<_>>());
+            let mut cells = Vec::new();
+            let _ = c.refine(
+                f,
+                p,
+                &mut Refinement::default(),
+                &mut |slot| slot != 2,
+                &mut |slot, build| {
+                    let cell = build();
+                    cells.push((slot, slots(c, cell, size)));
+                    c.dec_ref(cell);
+                    ControlFlow::Continue(())
+                },
+            );
+            cells.sort();
+            (
+                [f, g, v, h, q].map(|x| slots(c, x, size)),
+                value_labels,
+                pairs,
+                cells,
+            )
+        });
+        assert_eq!(results[0], results[1]);
+        let ([f, g, v, h, q], value_labels, pairs, cells) = &results[0];
+        assert_eq!(value_labels, &[9, 21, 20, 23, 22]);
+        assert_eq!(pairs.len(), 6);
+        assert_eq!(cells.len(), 2);
+        for x in 0..size as usize {
+            assert_eq!(f[x], (x % 3) as u32);
+            assert_eq!(g[x], (x % 2) as u32);
+            assert_eq!(q[x], u32::from(x % 3 == 1));
+            assert_eq!(pairs[h[x] as usize], (f[x], g[x]));
+            let label = 20 + (x % 4) as u32;
+            let expect = if x % 3 == 1 {
+                value_labels.iter().position(|&l| l == label).unwrap()
+            } else {
+                0
+            };
+            assert_eq!(v[x] as usize, expect, "at {x}");
+            for &(slot, ref cell) in cells {
+                assert_eq!(cell[x], u32::from(x % 5 == 1 && x % 3 == slot as usize));
+            }
+        }
+    }
 }

@@ -155,7 +155,7 @@ fn a_bitwise_map_over_symbols_is_rejected() {
 #[test]
 fn a_refinement_groups_selected_slots_and_forgets_declined_ones() {
     let mut r = Refinement::default();
-    r.restart(4);
+    r.restart();
     // Slot 2 is declined once and stays declined; the accepted slots keep
     // their group.
     let mut select = |slot: u32| slot != 2;
@@ -173,7 +173,7 @@ fn a_refinement_groups_selected_slots_and_forgets_declined_ones() {
     assert_eq!((r.groups[1].0, r.groups[1].1), (3, 6));
     r.finish();
     // A second call reuses the buffers, so the table must be empty again.
-    r.restart(4);
+    r.restart();
     assert_eq!(r.group(3, 0, &mut select), Some(0));
     r.finish();
     assert!(r.slots.iter().all(|&group| group == u32::MAX));
@@ -182,7 +182,7 @@ fn a_refinement_groups_selected_slots_and_forgets_declined_ones() {
 #[test]
 fn refinement_restart_clears_slots_after_a_selector_panic() {
     let mut r = Refinement::default();
-    r.restart(4);
+    r.restart();
     assert_eq!(r.group(3, 5, &mut |_| true), Some(0));
     r.groups[0].2.extend([8, 9]);
     assert_eq!(r.group(1, 5, &mut |_| false), None);
@@ -194,7 +194,7 @@ fn refinement_restart_clears_slots_after_a_selector_panic() {
     );
 
     // Cleanup must cover the old range even when the next partition is smaller.
-    r.restart(2);
+    r.restart();
     assert_eq!((r.live, r.reached), (0, 0));
     assert!(r.slots.iter().all(|&i| i == u32::MAX));
     let mut asked = Vec::new();
@@ -209,7 +209,7 @@ fn refinement_restart_clears_slots_after_a_selector_panic() {
     assert_eq!(r.groups[0], (1, 7, Vec::new()));
     assert_eq!((r.live, r.reached), (1, 1));
 
-    r.restart(4);
+    r.restart();
     assert_eq!(
         r.group(3, 9, &mut |slot| {
             asked.push(slot);

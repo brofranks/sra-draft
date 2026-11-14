@@ -278,16 +278,13 @@ pub struct Refinement {
 }
 
 impl Refinement {
-    /// Begins a call over a partition whose slot numbers are below `slots`.
+    /// Begins a call, reusing storage for previously reached slots.
     #[inline(always)]
-    pub fn restart(&mut self, slots: usize) {
+    pub fn restart(&mut self) {
         self.finish();
         self.live = 0;
         self.reached = 0;
         self.skipped.clear();
-        if self.slots.len() < slots {
-            self.slots.resize(slots, u32::MAX);
-        }
     }
 
     /// Finds or opens the group of `slot`, returning `None` once the caller has
@@ -302,6 +299,9 @@ impl Refinement {
         default: u32,
         select: &mut dyn FnMut(u32) -> bool,
     ) -> Option<usize> {
+        if self.slots.len() <= slot as usize {
+            self.slots.resize(slot as usize + 1, u32::MAX);
+        }
         let found = self.slots[slot as usize];
         if found == SKIPPED {
             return None;
