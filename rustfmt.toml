@@ -1,0 +1,4 @@
+# `cargo fmt` infers style edition 2024 from the manifest. Editors invoke bare
+# `rustfmt` on save, which defaults to style edition 2015. Setting the style
+# edition here keeps both in agreement.
+style_edition = "2024"
