@@ -355,6 +355,132 @@ pub trait IntoRow {
     fn append(&self, row: RowRef<'_>, out: &mut impl RowSink);
 }
 
+/// A bit-vector view of one existing scalar input, not a new symbolic
+/// variable.
+///
+/// Extraction changes only the view; equality constructs a native
+/// predicate over the original column.
+///
+/// Construction and extraction preserve a nonempty view within the original
+/// column. The width is read-only.
+///
+/// ```compile_fail,E0616
+/// fn widen(mut view: sra::Bv) {
+///     view.width = 2;
+/// }
+/// ```
+#[derive(Clone, Copy)]
+pub struct Bv {
+    column: ColumnId,
+    low: u32,
+    /// The number of bits in the view.
+    width: u32,
+}
+
+impl Bv {
+    /// Views a bound bit-vector input of `cx` as the input to native
+    /// predicate construction.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input` belongs to another context, is unbound, or has no
+    /// bit-vector sort.
+    #[inline(always)]
+    pub fn new(cx: &Context, input: impl Domain) -> Self {
+        let column = bitvector_column(&input.row(cx));
+        Bv {
+            column,
+            low: 0,
+            width: cx.resolve(column).sort().width(),
+        }
+    }
+
+    /// The original column of the view.
+    #[inline(always)]
+    pub const fn column(&self) -> ColumnId {
+        self.column
+    }
+
+    /// The number of bits in the view.
+    #[inline(always)]
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// A view of this view's inclusive SMT-LIB bit indices `high` through
+    /// `low`.
+    ///
+    /// Bit zero is least significant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `low` exceeds `high` or `high` is outside the view.
+    #[inline(always)]
+    pub fn extract(&self, high: u32, low: u32) -> Self {
+        assert!(
+            low <= high && high < self.width,
+            "extraction is outside its bit-vector view"
+        );
+        Self {
+            low: self.low + low,
+            width: high - low + 1,
+            ..*self
+        }
+    }
+
+    /// Equality to a ground value of the view's width.
+    ///
+    /// Integer literals and little-endian word slices use the same checked
+    /// encoding as rows; unconstrained input bits stay correlated. Requires a
+    /// backend with masked bit construction, such as the built-in BDD store.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the view belongs to another context or `value` does not
+    /// encode the view's width, or the column backend cannot construct masked
+    /// bit predicates.
+    #[inline(always)]
+    pub fn eq(&self, cx: &Context, value: impl IntoRow) -> Predicate {
+        assert_eq!(
+            self.column.context, cx.id,
+            "bit-vector view belongs to another context"
+        );
+        let sort = cx.bv_sort(self.width);
+        let mut words = Vec::with_capacity(sort.scalar().words());
+        value.append(
+            RowRef {
+                cx,
+                sort,
+                columns: std::slice::from_ref(&self.column),
+                members: &[],
+            },
+            &mut words,
+        );
+        assert!(
+            sort.scalar().accepts(&words),
+            "value does not encode the view width"
+        );
+        let mut mask = vec![0; cx.resolve(self.column).sort().words()];
+        let mut expected = vec![0; mask.len()];
+        let start = (self.low / u64::BITS) as usize;
+        let shift = self.low % u64::BITS;
+        for (i, &word) in words.iter().enumerate() {
+            let bits = if i + 1 == words.len() {
+                sort.scalar().top_mask()
+            } else {
+                u64::MAX
+            };
+            mask[start + i] |= bits << shift;
+            expected[start + i] |= word << shift;
+            if shift != 0 && start + i + 1 < mask.len() {
+                mask[start + i + 1] |= bits >> (u64::BITS - shift);
+                expected[start + i + 1] |= word >> (u64::BITS - shift);
+            }
+        }
+        cx.masked_eq(self.column, &mask, &expected)
+    }
+}
+
 /// Output of row conversion.
 ///
 /// Symbolic sinks reserve each predicate's scalar

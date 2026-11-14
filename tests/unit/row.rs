@@ -3,19 +3,35 @@
 //! `bv` binds a bit-vector row of a given width, and `words` packs ground
 //! arguments into a plain word vector. The `Symbolic` sink reserves each
 //! predicate's words and records its offset, and `symbolic` packs arguments
-//! through it, returning the words and predicate offsets.
+//! through it, returning the words and predicate offsets. `bits` binds a
+//! BDD-backed field for bit-vector views, and `values` lists a predicate's
+//! accepted values below sixteen.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use crate::ast::Sort;
 use crate::context::{Context, Predicate};
-use crate::row::{self, Domain, IntoRow, Row, RowRef, RowSink};
+use crate::row::{self, Bv, Domain, IntoRow, Row, RowRef, RowSink};
 
 /// A bound row of the bit-vector sort of width `w`.
 fn bv(cx: &mut Context, w: u32) -> Row {
     let sort = cx.bv_sort(w);
     sort.bind(cx)
+}
+
+/// A bound tuple with one BDD-backed bit-vector field of `width` bits.
+fn bits(cx: &mut Context, width: u32) -> Row {
+    let sort = cx.bv_sort(width);
+    let t = cx.tuple_decl("B", [("v", sort)]);
+    let backend = cx.backend("bdd");
+    cx.set_representation(t.accessors[0], backend);
+    t.accessors[0].bind(cx)
+}
+
+/// The values below sixteen that `p` accepts.
+fn values(p: &Predicate) -> Vec<u64> {
+    (0..16).filter(|v| p.contains(&[*v])).collect()
 }
 
 /// The ground words `args` pack into for `row`.
@@ -356,6 +372,111 @@ fn a_direct_predicate_of_another_context_is_rejected() {
     let mut cx = Context::default();
     let r = bv(&mut cx, 4);
     symbolic(&cx, &r, Direct(p));
+}
+
+// --- bit-vector views -------------------------------------------------------
+
+#[test]
+fn bit_vector_views_constrain_the_original_column() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 4);
+    let v = Bv::new(&cx, row);
+    assert_eq!(v.width(), 4);
+    assert_eq!(values(&v.eq(&cx, 5_u8)), [5]);
+    let high = v.extract(3, 2);
+    assert_eq!(high.width(), 2);
+    assert_eq!(values(&high.eq(&cx, 3_u8)), [12, 13, 14, 15]);
+    assert_eq!(
+        values(&high.extract(0, 0).eq(&cx, 1_u8)),
+        (0..16).filter(|x| x & 4 != 0).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_high_bit_view_preserves_the_original_column() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 64);
+    let v = Bv::new(&cx, row).extract(63, 63);
+    assert_eq!(v.width(), 1);
+    for bit in [0_u8, 1] {
+        let p = v.eq(&cx, bit);
+        assert_eq!(p.count(), (1_u64 << 63).into());
+        for value in [0_u64, 1, (1_u64 << 63) - 1, 1_u64 << 63, u64::MAX] {
+            assert_eq!(p.contains(&[value]), (value >> 63) == u64::from(bit));
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "integer literal exceeds its scalar sort")]
+fn an_out_of_width_literal_for_a_high_bit_view_is_rejected() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 64);
+    Bv::new(&cx, row).extract(63, 63).eq(&cx, 2_u8);
+}
+
+#[test]
+fn wide_views_spill_across_words() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 70);
+    let v = Bv::new(&cx, row);
+    let p = v.extract(69, 3).eq(&cx, &[1_u64, 4][..]);
+    assert_eq!(p.count(), 8_u32.into());
+    assert!(p.contains(&[8, 32]) && !p.contains(&[8, 0]));
+    assert_eq!(
+        v.extract(69, 0).eq(&cx, &[5_u64, 0][..]).count(),
+        1_u32.into()
+    );
+}
+
+#[test]
+#[should_panic(expected = "extraction is outside its bit-vector view")]
+fn extraction_indices_are_ordered_is_rejected() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 8);
+    Bv::new(&cx, row).extract(2, 3);
+}
+
+#[test]
+#[should_panic(expected = "extraction is outside its bit-vector view")]
+fn extraction_stays_inside_its_view_is_rejected() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 8);
+    Bv::new(&cx, row).extract(8, 0);
+}
+
+#[test]
+#[should_panic(expected = "bit-vector view belongs to another context")]
+fn views_belong_to_one_context_is_rejected() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 8);
+    let v = Bv::new(&cx, row);
+    v.eq(&Context::default(), 1_u8);
+}
+
+#[test]
+fn bitvector_views_accept_scalar_wrappers() {
+    let mut cx = Context::default();
+    let row = bits(&mut cx, 4);
+    let view = Bv::new(&cx, row);
+    for (v, expected) in [(view, vec![1]), (view.extract(3, 2), vec![4, 5, 6, 7])] {
+        let predicates = [
+            v.eq(&cx, 1_u8),
+            v.eq(&cx, (1_u8,)),
+            v.eq(&cx, ((1_u8,),)),
+            v.eq(&cx, ((), 1_u8, ())),
+        ];
+        for p in predicates {
+            assert_eq!(
+                (0..16).filter(|&n| p.contains(&[n])).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+    let v = view.extract(3, 2);
+    assert!(catch_unwind(AssertUnwindSafe(|| v.eq(&cx, (4_u8,)))).is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| v.eq(&cx, &[4_u64][..]))).is_err());
+    assert!(catch_unwind(AssertUnwindSafe(|| v.eq(&cx, &[1_u64, 0][..]))).is_err());
 }
 
 // --- literal packing --------------------------------------------------------

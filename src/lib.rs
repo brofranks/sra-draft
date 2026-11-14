@@ -6,7 +6,8 @@
 //! [`partition`], and [`index`] the stored shape of a relation, and [`rel`],
 //! [`query`], and [`run`] the relations, combinators, and their execution,
 //! [`pred`] the field predicates that restrict them, [`iteration`] the
-//! semi-naive fixed points over them, and [`typed`] the Rust endpoint
+//! semi-naive fixed points over them, [`loader`] the SMT-LIB guard
+//! definitions evaluated into predicates, and [`typed`] the Rust endpoint
 //! interpretations over all of it.
 #![warn(missing_docs)]
 
@@ -19,6 +20,7 @@ pub mod bdd;
 pub mod context;
 pub mod index;
 pub mod iteration;
+pub mod loader;
 pub mod map;
 pub mod partition;
 pub mod pred;
@@ -38,7 +40,7 @@ pub use iteration::Variable;
 pub use pred::{Build, Filter, Membership};
 pub use query::{IntoQuery, Operand, Query};
 pub use rel::Rel;
-pub use row::{IntoRow, Row};
+pub use row::{Bv, IntoRow, Row};
 pub use run::Binding;
 pub use scalar::ScalarSort;
 pub use sparse::SparseTable;
