@@ -10,13 +10,13 @@ jobs:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
         part:
           - name: bdd-extra
-            flags: """"
+            flags: ""
             args: "--lib -- --exact bdd::tests::wide_bit_maps_agree_with_literal_finite_images_and_preimages bdd::tests::partition_caches_refresh_after_collection_and_between_stores bdd::tests::quotients_coarsen_and_recheck_their_cached_slots"
           - name: dag-integration
-            flags: """"
+            flags: ""
             args: "--test dag --"
           - name: dag-unit
-            flags: """"
+            flags: ""
             args: "--lib -- util::dag::"
           - name: tree-soundness
             flags: "-Zmiri-tree-borrows"
