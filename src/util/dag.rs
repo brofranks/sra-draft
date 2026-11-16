@@ -1550,6 +1550,13 @@ pub struct Read<'a, S> {
     counter: &'a AtomicU32,
 }
 
+// SAFETY: the guard acts as a shared reference to the store and to its counter,
+// which any thread may use and release.
+unsafe impl<S: Sync> Send for Read<'_, S> {}
+
+// SAFETY: a shared guard only lends shared references to the store.
+unsafe impl<S: Sync> Sync for Read<'_, S> {}
+
 impl<S> Deref for Read<'_, S> {
     type Target = S;
 
