@@ -50,21 +50,48 @@ jobs:
       fail-fast: false
       matrix:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
-    name: miri (${{ matrix.target }})
+        borrows: [stacked, tree]
+    name: miri (${{ matrix.target }}, ${{ matrix.borrows }} borrows)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-11-14
+      MIRIFLAGS: ${{ matrix.borrows == 'tree' && '-Zmiri-tree-borrows' || '' }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install nightly --profile minimal --component miri,rust-src
-      - run: cargo +nightly miri test --locked --test soundness --target ${{ matrix.target }}
+      - run: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal --component miri,rust-src
+      - run: cargo miri test --locked --test soundness --target ${{ matrix.target }}
+      # Named tests follow. Each step checks its pass count, so a renamed test
+      # fails the step instead of silently dropping out.
+      #
       # The BDD store's own unsafe code, and its use of the DAG across threads,
-      # collection, growth, and reentry.
+      # collection, growth, and reentry. The recursive operations hold node edge
+      # slices while interning into the same arena.
       - run: >-
-          cargo +nightly miri test --locked --lib --target ${{ matrix.target }} -- --exact
+          cargo miri test --locked --lib --target ${{ matrix.target }} -- --exact
           bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full
           bdd::tests::concurrent_operations_preserve_canonical_roots_across_collection
           bdd::tests::retained_roots_and_member_cursors_survive_collection
           bdd::tests::refinement_delivery_can_collect_and_reenter_the_store
           bdd::tests::sets_cuts_and_bit_tests_survive_growth
+          bdd::tests::conditionals_resolve_the_constant_cases
+          bdd::tests::wide_bit_maps_agree_with_literal_finite_images_and_preimages
+          bdd::tests::partition_caches_refresh_after_collection_and_between_stores
+          bdd::tests::quotients_coarsen_and_recheck_their_cached_slots
+          util::dag::tests::cached_batches_remain_owned_when_arena_cache_cells_collide
+          | tee /dev/stderr | grep '^test result: ok. 10 passed'
+      # Unwinding out of DAG construction, which the fixture does not reach.
+      - run: >-
+          cargo miri test --locked --test dag --target ${{ matrix.target }} -- --exact
+          a_panicking_pinned_iterator_drops_initialized_values_once
+          | tee /dev/stderr | grep '^test result: ok. 1 passed'
+      # Miri checks one thread schedule per seed. Sweep seeds over the fixture.
+      - if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.borrows == 'stacked'
+        run: cargo miri test --locked --test soundness --target ${{ matrix.target }}
+        env:
+          MIRIFLAGS: -Zmiri-many-seeds=0..8
