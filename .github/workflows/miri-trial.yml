@@ -10,26 +10,26 @@ jobs:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
         part:
           - name: bdd-extra
-            flags: ""
-            args: --lib -- --exact bdd::tests::wide_bit_maps_agree_with_literal_finite_images_and_preimages bdd::tests::partition_caches_refresh_after_collection_and_between_stores bdd::tests::quotients_coarsen_and_recheck_their_cached_slots
+            flags: """"
+            args: "--lib -- --exact bdd::tests::wide_bit_maps_agree_with_literal_finite_images_and_preimages bdd::tests::partition_caches_refresh_after_collection_and_between_stores bdd::tests::quotients_coarsen_and_recheck_their_cached_slots"
           - name: dag-integration
-            flags: ""
-            args: --test dag --
+            flags: """"
+            args: "--test dag --"
           - name: dag-unit
-            flags: ""
-            args: --lib -- util::dag::
+            flags: """"
+            args: "--lib -- util::dag::"
           - name: tree-soundness
-            flags: -Zmiri-tree-borrows
-            args: --test soundness --
+            flags: "-Zmiri-tree-borrows"
+            args: "--test soundness --"
           - name: tree-bdd
-            flags: -Zmiri-tree-borrows
-            args: --lib -- --exact bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full bdd::tests::concurrent_operations_preserve_canonical_roots_across_collection bdd::tests::retained_roots_and_member_cursors_survive_collection bdd::tests::refinement_delivery_can_collect_and_reenter_the_store bdd::tests::sets_cuts_and_bit_tests_survive_growth
+            flags: "-Zmiri-tree-borrows"
+            args: "--lib -- --exact bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full bdd::tests::concurrent_operations_preserve_canonical_roots_across_collection bdd::tests::retained_roots_and_member_cursors_survive_collection bdd::tests::refinement_delivery_can_collect_and_reenter_the_store bdd::tests::sets_cuts_and_bit_tests_survive_growth"
           - name: seeds-soundness
-            flags: -Zmiri-many-seeds=0..8
-            args: --test soundness -- --exact a_reentrant_conversion_reserves_a_distinct_slot publication_is_visible_through_acquire_alone concurrent_interning_survives_growth_with_owned_values reader_release_can_race_with_growth
+            flags: "-Zmiri-many-seeds=0..8"
+            args: "--test soundness -- --exact a_reentrant_conversion_reserves_a_distinct_slot publication_is_visible_through_acquire_alone concurrent_interning_survives_growth_with_owned_values reader_release_can_race_with_growth"
           - name: seeds-bdd
-            flags: -Zmiri-many-seeds=0..8
-            args: --lib -- --exact bdd::tests::concurrent_operations_preserve_canonical_roots_across_collection
+            flags: "-Zmiri-many-seeds=0..8"
+            args: "--lib -- --exact bdd::tests::concurrent_operations_preserve_canonical_roots_across_collection"
     name: trial (${{ matrix.target }}, ${{ matrix.part.name }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
