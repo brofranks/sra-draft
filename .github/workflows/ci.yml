@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      RUSTUP_TOOLCHAIN: nightly-2026-11-14
+      RUSTUP_TOOLCHAIN: nightly
       MIRIFLAGS: ${{ matrix.borrows == 'tree' && '-Zmiri-tree-borrows' || '' }}
     defaults:
       run:
