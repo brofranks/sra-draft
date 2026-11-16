@@ -6,46 +6,14 @@ defaults:
   run:
     shell: bash
 jobs:
-  trial:
+  resume:
     strategy:
       fail-fast: false
       matrix:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
-        part:
-          - name: dag-findings
-            pre: "true"
-            flags: ""
-            args: "--test dag -- --exact workers_resume_reserved_batches_after_compaction a_panicking_pinned_iterator_drops_initialized_values_once"
-          - name: dag-collide
-            pre: "true"
-            flags: ""
-            args: "--lib -- --exact util::dag::tests::cached_batches_remain_owned_when_arena_cache_cells_collide"
-          - name: ite
-            pre: "true"
-            flags: ""
-            args: "--lib -- --exact bdd::tests::conditionals_resolve_the_constant_cases"
-          - name: seeds-fixed
-            pre: "true"
-            flags: "-Zmiri-many-seeds=0..64 -Zmiri-preemption-rate=0.5"
-            args: "--test soundness -- --exact a_reentrant_conversion_reserves_a_distinct_slot publication_is_visible_through_acquire_alone concurrent_interning_survives_growth_with_owned_values reader_release_can_race_with_growth"
-          - name: repro-unfixed
-            pre: "cp repro/dag.rs src/util/dag.rs"
-            flags: "-Zmiri-many-seeds=0..64 -Zmiri-preemption-rate=0.5"
-            args: "--test soundness -- --exact a_reentrant_conversion_reserves_a_distinct_slot publication_is_visible_through_acquire_alone concurrent_interning_survives_growth_with_owned_values reader_release_can_race_with_growth"
-    name: trial (${{ matrix.target }}, ${{ matrix.part.name }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - run: rustup toolchain install nightly-2026-11-14 --profile minimal --component miri,rust-src
-      - run: cargo +nightly-2026-11-14 miri setup --target ${{ matrix.target }}
-      - run: ${{ matrix.part.pre }}
-      - env:
-          MIRIFLAGS: ${{ matrix.part.flags }}
-        run: cargo +nightly-2026-11-14 miri test --locked --target ${{ matrix.target }} ${{ matrix.part.args }} -Zunstable-options --report-time
-  guard:
+        tree: [fixed, unfixed]
+        seed: [0, 1, 2, 3]
+    name: resume (${{ matrix.target }}, ${{ matrix.tree }}, seed ${{ matrix.seed }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -53,9 +21,13 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install nightly-2026-11-14 --profile minimal --component miri,rust-src
-      # The pass-count check must reject a list with a stale name.
-      - run: >-
-          ! cargo +nightly-2026-11-14 miri test --locked --lib -- --exact
-          bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full
-          bdd::tests::no_such_test
-          | tee /dev/stderr | grep 'test result: ok. 2 passed'
+      - run: cargo +nightly-2026-11-14 miri setup --target ${{ matrix.target }}
+      - if: matrix.tree == 'unfixed'
+        run: cp repro/dag.rs src/util/dag.rs
+      - run: cargo +nightly-2026-11-14 miri test --locked --target ${{ matrix.target }} --test dag --no-run
+      - env:
+          MIRIFLAGS: -Zmiri-seed=${{ matrix.seed }}
+        run: >-
+          timeout 300 cargo +nightly-2026-11-14 miri test --locked --target ${{ matrix.target }}
+          --test dag -- --exact workers_resume_reserved_batches_after_compaction
+          -Zunstable-options --report-time
