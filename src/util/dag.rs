@@ -1542,7 +1542,11 @@ fn counter_index() -> usize {
 #[derive(Debug)]
 #[must_use = "dropping the guard ends this thread's admission"]
 pub struct Read<'a, S> {
-    store: &'a S,
+    /// The admitted store, held as a pointer so no reference to it outlives this
+    /// guard's release. A reference field would stay protected while the guard is
+    /// passed by value, as to `drop`, after the release lets a writer take
+    /// exclusive access.
+    store: *const S,
     counter: &'a AtomicU32,
 }
 
@@ -1551,7 +1555,8 @@ impl<S> Deref for Read<'_, S> {
 
     #[inline(always)]
     fn deref(&self) -> &S {
-        self.store
+        // SAFETY: admission excludes exclusive access until this guard's drop.
+        unsafe { &*self.store }
     }
 }
 
@@ -1690,8 +1695,7 @@ impl<S: Grow> Shared<S> {
                 .expect("reader count overflow");
             if self.requested.load(Ordering::SeqCst) == 0 {
                 return Read {
-                    // SAFETY: admission excludes exclusive access until this reader leaves.
-                    store: unsafe { self.store.as_ref_unchecked() },
+                    store: self.store.get(),
                     counter,
                 };
             }

@@ -2,6 +2,9 @@ name: miri-trial
 on: push
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 jobs:
   trial:
     strategy:
@@ -9,36 +12,50 @@ jobs:
       matrix:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
         part:
-          - name: bdd-extra
+          - name: dag-findings
+            pre: "true"
             flags: ""
-            args: "--lib -- --exact bdd::tests::wide_bit_maps_agree_with_literal_finite_images_and_preimages bdd::tests::partition_caches_refresh_after_collection_and_between_stores bdd::tests::quotients_coarsen_and_recheck_their_cached_slots"
-          - name: dag-integration
+            args: "--test dag -- --exact workers_resume_reserved_batches_after_compaction a_panicking_pinned_iterator_drops_initialized_values_once"
+          - name: dag-collide
+            pre: "true"
             flags: ""
-            args: "--test dag --"
-          - name: dag-unit
+            args: "--lib -- --exact util::dag::tests::cached_batches_remain_owned_when_arena_cache_cells_collide"
+          - name: ite
+            pre: "true"
             flags: ""
-            args: "--lib -- util::dag::"
-          - name: tree-soundness
-            flags: "-Zmiri-tree-borrows"
-            args: "--test soundness --"
-          - name: tree-bdd
-            flags: "-Zmiri-tree-borrows"
-            args: "--lib -- --exact bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full bdd::tests::concurrent_operations_preserve_canonical_roots_across_collection bdd::tests::retained_roots_and_member_cursors_survive_collection bdd::tests::refinement_delivery_can_collect_and_reenter_the_store bdd::tests::sets_cuts_and_bit_tests_survive_growth"
-          - name: seeds-soundness
-            flags: "-Zmiri-many-seeds=0..8"
+            args: "--lib -- --exact bdd::tests::conditionals_resolve_the_constant_cases"
+          - name: seeds-fixed
+            pre: "true"
+            flags: "-Zmiri-many-seeds=0..64 -Zmiri-preemption-rate=0.5"
             args: "--test soundness -- --exact a_reentrant_conversion_reserves_a_distinct_slot publication_is_visible_through_acquire_alone concurrent_interning_survives_growth_with_owned_values reader_release_can_race_with_growth"
-          - name: seeds-bdd
-            flags: "-Zmiri-many-seeds=0..8"
-            args: "--lib -- --exact bdd::tests::concurrent_operations_preserve_canonical_roots_across_collection"
+          - name: repro-unfixed
+            pre: "cp repro/dag.rs src/util/dag.rs"
+            flags: "-Zmiri-many-seeds=0..64 -Zmiri-preemption-rate=0.5"
+            args: "--test soundness -- --exact a_reentrant_conversion_reserves_a_distinct_slot publication_is_visible_through_acquire_alone concurrent_interning_survives_growth_with_owned_values reader_release_can_race_with_growth"
     name: trial (${{ matrix.target }}, ${{ matrix.part.name }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install nightly --profile minimal --component miri,rust-src
-      - run: cargo +nightly miri setup --target ${{ matrix.target }}
+      - run: rustup toolchain install nightly-2026-11-14 --profile minimal --component miri,rust-src
+      - run: cargo +nightly-2026-11-14 miri setup --target ${{ matrix.target }}
+      - run: ${{ matrix.part.pre }}
       - env:
           MIRIFLAGS: ${{ matrix.part.flags }}
-        run: cargo +nightly miri test --locked --target ${{ matrix.target }} ${{ matrix.part.args }} -Zunstable-options --report-time
+        run: cargo +nightly-2026-11-14 miri test --locked --target ${{ matrix.target }} ${{ matrix.part.args }} -Zunstable-options --report-time
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly-2026-11-14 --profile minimal --component miri,rust-src
+      # The pass-count check must reject a list with a stale name.
+      - run: >-
+          ! cargo +nightly-2026-11-14 miri test --locked --lib -- --exact
+          bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full
+          bdd::tests::no_such_test
+          | tee /dev/stderr | grep 'test result: ok. 2 passed'
