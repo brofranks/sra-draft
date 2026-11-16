@@ -169,6 +169,7 @@ fn cached_batches_remain_owned_when_arena_cache_cells_collide() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_publication_leaves_less_than_one_unused_node_batch_per_worker() {
     const WORKERS: usize = 4;
     const EACH: usize = 10_000;
@@ -193,6 +194,7 @@ fn concurrent_publication_leaves_less_than_one_unused_node_batch_per_worker() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn colliding_arenas_finish_more_than_2048_alternating_publications() {
     const EACH: usize = 2049;
     let capacity = (EACH * BATCH_MAX).next_power_of_two();
@@ -229,6 +231,7 @@ fn colliding_arenas_finish_more_than_2048_alternating_publications() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn edge_spans_larger_than_the_speculative_cap_remain_contiguous() {
     let dag: Dag<Id, u64, ()> = Dag::with_capacity(2, 1 << 22, []);
     let edges = vec![(); BATCH_MAX + 1];
@@ -268,6 +271,7 @@ fn probing_visits_every_bucket_once() {
 // --- collection and maintenance ----------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn rebuild_across_threads_keeps_every_retained_entry_findable() {
     // Two chunks of retained entries put helpers to work. Check ordinary hashes and
     // deliberate collisions, preserving canonical IDs and the entry count after
@@ -336,6 +340,7 @@ fn rebuild_across_threads_keeps_every_retained_entry_findable() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn a_helper_panic_during_rebuild_reaches_the_maintenance_caller() {
     // Two chunks of retained entries give the insert phase one helper, which
     // panics while the caller's own chunk completes. The one unreferenced node
@@ -390,6 +395,7 @@ fn small_table_rebuild_hashes_on_the_maintenance_caller() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn reclaiming_published_nodes_preserves_an_empty_unique_table() {
     let mut dag: Arena<Id> = Dag::with_capacity(32768, 0, []);
     let groups = dag.groups.as_ptr();

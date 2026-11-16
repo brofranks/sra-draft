@@ -590,6 +590,7 @@ fn collection_reclaims_unreachable_nodes_compacts_edges_and_reuses_ids() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn publication_after_a_reclaim_panic_discards_reserved_free_list_entries() {
     // Two-slot batches leave an unused frontier slot, then an unused free-list
     // entry. The second collection clears that list before its callback panics.
@@ -870,6 +871,7 @@ fn requesting_an_edge_span_beyond_u32_is_rejected() {
 // --- concurrent admission ----------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_interning_agrees_on_one_node_per_key_across_growth() {
     // Eight workers, a six-entry table, and an arena with room for almost nothing:
     // admission, publication, bucket installation, and growth all collide. Each
@@ -985,6 +987,7 @@ fn a_candidate_that_loses_every_remaining_bucket_reports_a_full_table() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_publication_returns_each_workers_value() {
     const WORKERS: usize = 8;
     const EACH: u64 = 256;
@@ -1024,6 +1027,7 @@ fn concurrent_publication_returns_each_workers_value() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn workers_interning_shared_chains_with_reference_churn_stay_consistent() {
     // Thirty-two workers intern overlapping chains of child-linked nodes into an
     // arena that starts with room for almost nothing, so growth, collection, failed
@@ -1132,6 +1136,7 @@ fn workers_interning_shared_chains_with_reference_churn_stay_consistent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_batched_publication_preserves_contents_and_reclaims_nodes() {
     // A large arena gives each thread multi-slot regions. Published IDs are
     // distinct, their contents are preserved, and collection reclaims every node
@@ -1177,6 +1182,7 @@ fn concurrent_batched_publication_preserves_contents_and_reclaims_nodes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn workers_resume_reserved_batches_after_compaction() {
     // Workers remain alive across two collections. Each phase leaves a partial
     // two-slot batch, first in the frontier and then in the rebuilt free list.
