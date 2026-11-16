@@ -395,9 +395,8 @@ fn small_table_rebuild_hashes_on_the_maintenance_caller() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn reclaiming_published_nodes_preserves_an_empty_unique_table() {
-    let mut dag: Arena<Id> = Dag::with_capacity(32768, 0, []);
+    let mut dag: Arena<Id> = Dag::with_capacity(2, 0, []);
     let groups = dag.groups.as_ptr();
     let buckets = dag.buckets();
     let id = dag.publish(|| 7, &[]).unwrap();

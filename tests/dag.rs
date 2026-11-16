@@ -871,7 +871,6 @@ fn requesting_an_edge_span_beyond_u32_is_rejected() {
 // --- concurrent admission ----------------------------------------------------
 
 #[test]
-#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_interning_agrees_on_one_node_per_key_across_growth() {
     // Eight workers, a six-entry table, and an arena with room for almost nothing:
     // admission, publication, bucket installation, and growth all collide. Each
@@ -880,15 +879,16 @@ fn concurrent_interning_agrees_on_one_node_per_key_across_growth() {
     // and candidates lose their bucket to a different value. The test checks that
     // every attempt eventually succeeds and all workers agree on each key's
     // canonical node. Repetitions sample schedules without requiring a particular
-    // race in any round.
-    const WORKERS: usize = 8;
+    // race in any round. Miri runs fewer workers and rounds.
+    const WORKERS: usize = if cfg!(miri) { 3 } else { 8 };
+    const ROUNDS: usize = if cfg!(miri) { 2 } else { 100 };
     type Key = fn(u64) -> (u64, Vec<Edge<Id>>);
     let families: [(u64, Key); 2] = [
         (12, |k| (k, vec![Edge::Opaque(k)])),
         (10, |k| (k << 32 | 3, Vec::new())),
     ];
     for (keys, key) in families {
-        for _round in 0..100 {
+        for _round in 0..ROUNDS {
             let shared = &Store::<Id>::shared(2, 2);
             let results: Vec<Vec<Id>> = thread::scope(|scope| {
                 let workers: Vec<_> = (0..WORKERS as u64)
@@ -987,10 +987,9 @@ fn a_candidate_that_loses_every_remaining_bucket_reports_a_full_table() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_publication_returns_each_workers_value() {
-    const WORKERS: usize = 8;
-    const EACH: u64 = 256;
+    const WORKERS: usize = if cfg!(miri) { 3 } else { 8 };
+    const EACH: u64 = if cfg!(miri) { 32 } else { 256 };
     // Publication into a roomy arena: nothing here can fail, so every worker
     // contends for the shared frontier alone. The outcome is that the frontier
     // hands out each slot once.
@@ -1027,7 +1026,6 @@ fn concurrent_publication_returns_each_workers_value() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn workers_interning_shared_chains_with_reference_churn_stay_consistent() {
     // Thirty-two workers intern overlapping chains of child-linked nodes into an
     // arena that starts with room for almost nothing, so growth, collection, failed
@@ -1036,10 +1034,11 @@ fn workers_interning_shared_chains_with_reference_churn_stay_consistent() {
     // are checked: all retained roots agree with a fresh interning of their chain,
     // a sweep leaves exactly the nodes reachable from retained roots and no
     // duplicate keys, and the reference counts drain to zero.
-    const WORKERS: u64 = 32;
+    // Miri runs fewer workers and rounds.
+    const WORKERS: u64 = if cfg!(miri) { 3 } else { 32 };
     const KEYS: u64 = 24;
     const DEPTH: u64 = 5;
-    const ROUNDS: usize = 3000;
+    const ROUNDS: usize = if cfg!(miri) { 12 } else { 3000 };
     const WINDOW: usize = 8;
     type Roots = Vec<(u64, Id)>;
 
