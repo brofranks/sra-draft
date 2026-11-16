@@ -19,7 +19,7 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
-use sra::util::dag::{Dag, Exhausted, Grow, Idx, NeedGrowth, Shared, structural_hash};
+use sra::util::dag::{Dag, Exhausted, Grow, Idx, NeedGrowth, Read, Shared, structural_hash};
 
 sra::idx! { struct Id; }
 
@@ -465,6 +465,21 @@ fn reader_release_can_race_with_growth() {
         });
         assert_eq!(shared.epoch(), 1);
     }
+}
+
+#[test]
+fn a_guard_released_inside_its_callee_admits_growth_before_return() {
+    // One thread: the callee owns the guard, so anything the guard holds stays
+    // live for the whole call. Releasing it there must leave nothing that
+    // excludes the growth that follows.
+    fn release_then_grow(s: Read<'_, Store<Id>>, shared: &Shared<Store<Id>>) {
+        drop(s);
+        fail_with(shared, &[NeedGrowth::Nodes]);
+    }
+
+    let shared = Store::<Id>::shared(4, 0);
+    release_then_grow(shared.read(()), &shared);
+    assert_eq!(shared.epoch(), 1);
 }
 
 #[test]
