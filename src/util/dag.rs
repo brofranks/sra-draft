@@ -1294,7 +1294,10 @@ impl<I: Idx, N, E: Copy> Dag<I, N, E> {
 
         // Invalidate reserved ranges before changing their free-list entries or edge
         // layout, including when a reclaim callback or node destructor panics.
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("reservation generation overflow");
         self.free_nodes.clear();
         *self.free_len.get_mut() = 0;
         let mut reclaimed = 0;
@@ -1421,7 +1424,8 @@ impl<I: Idx, N, E: Copy> Dag<I, N, E> {
     /// # Panics
     ///
     /// Panics if `threads` is zero, a traced child does not name a published node,
-    /// or the required capacity exceeds the representation limits.
+    /// the reservation generation is exhausted, or the required capacity exceeds
+    /// the representation limits.
     ///
     /// If a callback or node destructor panics, the DAG remains memory-safe,
     /// but its contents are unspecified. Callers should discard it rather than
