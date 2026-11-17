@@ -590,6 +590,7 @@ fn collection_reclaims_unreachable_nodes_compacts_edges_and_reuses_ids() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn publication_after_a_reclaim_panic_discards_reserved_free_list_entries() {
     // Two-slot batches leave an unused frontier slot, then an unused free-list
     // entry. The second collection clears that list before its callback panics.
@@ -878,15 +879,16 @@ fn concurrent_interning_agrees_on_one_node_per_key_across_growth() {
     // and candidates lose their bucket to a different value. The test checks that
     // every attempt eventually succeeds and all workers agree on each key's
     // canonical node. Repetitions sample schedules without requiring a particular
-    // race in any round.
-    const WORKERS: usize = 8;
+    // race in any round. Miri runs fewer workers and rounds.
+    const WORKERS: usize = if cfg!(miri) { 3 } else { 8 };
+    const ROUNDS: usize = if cfg!(miri) { 2 } else { 100 };
     type Key = fn(u64) -> (u64, Vec<Edge<Id>>);
     let families: [(u64, Key); 2] = [
         (12, |k| (k, vec![Edge::Opaque(k)])),
         (10, |k| (k << 32 | 3, Vec::new())),
     ];
     for (keys, key) in families {
-        for _round in 0..100 {
+        for _round in 0..ROUNDS {
             let shared = &Store::<Id>::shared(2, 2);
             let results: Vec<Vec<Id>> = thread::scope(|scope| {
                 let workers: Vec<_> = (0..WORKERS as u64)
@@ -986,8 +988,8 @@ fn a_candidate_that_loses_every_remaining_bucket_reports_a_full_table() {
 
 #[test]
 fn concurrent_publication_returns_each_workers_value() {
-    const WORKERS: usize = 8;
-    const EACH: u64 = 256;
+    const WORKERS: usize = if cfg!(miri) { 3 } else { 8 };
+    const EACH: u64 = if cfg!(miri) { 32 } else { 256 };
     // Publication into a roomy arena: nothing here can fail, so every worker
     // contends for the shared frontier alone. The outcome is that the frontier
     // hands out each slot once.
@@ -1032,10 +1034,11 @@ fn workers_interning_shared_chains_with_reference_churn_stay_consistent() {
     // are checked: all retained roots agree with a fresh interning of their chain,
     // a sweep leaves exactly the nodes reachable from retained roots and no
     // duplicate keys, and the reference counts drain to zero.
-    const WORKERS: u64 = 32;
+    // Miri runs fewer workers and rounds.
+    const WORKERS: u64 = if cfg!(miri) { 3 } else { 32 };
     const KEYS: u64 = 24;
     const DEPTH: u64 = 5;
-    const ROUNDS: usize = 3000;
+    const ROUNDS: usize = if cfg!(miri) { 12 } else { 3000 };
     const WINDOW: usize = 8;
     type Roots = Vec<(u64, Id)>;
 
@@ -1090,6 +1093,21 @@ fn workers_interning_shared_chains_with_reference_churn_stay_consistent() {
     fail_with(shared, &[NeedGrowth::Nodes, NeedGrowth::Nodes]);
     {
         let s = shared.read(());
+        // Derive contents from the retained key, independently of the graph
+        // returned after compaction.
+        for &(k, root) in &held {
+            let mut id = root;
+            for level in (1..=DEPTH).rev() {
+                let node = s.dag.node(id);
+                assert_eq!(*node, level << 32 | k);
+                let [Edge::Child(child)] = node.edges else {
+                    panic!("chain level must have exactly one child");
+                };
+                id = *child;
+            }
+            assert_eq!(*s.dag.node(id), k % 4);
+            assert_eq!(s.dag.node(id).edges, [Edge::Opaque(k % 4)]);
+        }
         let mut reachable = HashSet::new();
         let mut keys = HashSet::new();
         let mut stack: Vec<Id> = held.iter().map(|&(_, id)| id).collect();
@@ -1132,6 +1150,7 @@ fn workers_interning_shared_chains_with_reference_churn_stay_consistent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_batched_publication_preserves_contents_and_reclaims_nodes() {
     // A large arena gives each thread multi-slot regions. Published IDs are
     // distinct, their contents are preserved, and collection reclaims every node
@@ -1177,6 +1196,7 @@ fn concurrent_batched_publication_preserves_contents_and_reclaims_nodes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn workers_resume_reserved_batches_after_compaction() {
     // Workers remain alive across two collections. Each phase leaves a partial
     // two-slot batch, first in the frontier and then in the rebuilt free list.

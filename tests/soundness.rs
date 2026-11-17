@@ -211,46 +211,59 @@ fn a_reentrant_conversion_reserves_a_distinct_slot() {
 
 #[test]
 fn publication_is_visible_through_acquire_alone() {
-    let dag: &Arena<Id> = &Dag::with_capacity(8, 8, [Box::new(10)]);
-    let leaf = Id::new(0);
-    let shapes: [(u64, &[Edge<Id>]); 3] = [
-        (1, &[]),
-        (2, &[Edge::Child(leaf)]),
-        (3, &[Edge::Opaque(4), Edge::Opaque(5)]),
-    ];
-    // The reader learns each ID through a Relaxed handoff, so the node's own
-    // Release publication and Acquire read are the only ordering between the write
-    // and the read.
-    let handoff: &[AtomicUsize; 3] = &array::from_fn(|_| AtomicUsize::new(0));
-    thread::scope(|scope| {
-        scope.spawn(move || {
-            for (cell, &(value, edges)) in handoff.iter().zip(&shapes) {
-                let id = dag.publish(|| Box::new(value), edges).unwrap();
-                cell.store(id.index() + 1, Ordering::Relaxed);
-            }
-        });
-        scope.spawn(move || {
-            // Publishing from the reader too contends for the frontier with the writer.
-            let own = dag.publish(|| Box::new(6), &[Edge::Opaque(6)]).unwrap();
-            for (cell, &(value, edges)) in handoff.iter().zip(&shapes) {
-                let id = loop {
-                    match cell.load(Ordering::Relaxed) {
-                        0 => hint::spin_loop(),
-                        id => break Id::new(id - 1),
+    for transition in 0..4 {
+        let dag: &Arena<Id> = &Dag::with_capacity(8, 8, [Box::new(10)]);
+        let leaf = Id::new(0);
+        let shapes: [(u64, &[Edge<Id>]); 3] = [
+            (1, &[]),
+            (2, &[Edge::Child(leaf)]),
+            (3, &[Edge::Opaque(4), Edge::Opaque(5)]),
+        ];
+        // The reader learns each ID through a Relaxed handoff, so the node's own
+        // Release publication and Acquire read are the only ordering between the write
+        // and the read.
+        let handoff: &[AtomicUsize; 3] = &array::from_fn(|_| AtomicUsize::new(0));
+        thread::scope(|scope| {
+            scope.spawn(move || {
+                for (cell, &(value, edges)) in handoff.iter().zip(&shapes) {
+                    let id = dag.publish(|| Box::new(value), edges).unwrap();
+                    // Each reference-state RMW must preserve the publication release sequence.
+                    match transition {
+                        0 => {}
+                        1 => dag.pin(id),
+                        2 => dag.inc_ref(id),
+                        3 => {
+                            dag.inc_ref(id);
+                            dag.dec_ref(id);
+                        }
+                        _ => unreachable!(),
                     }
-                };
-                while dag.get(id).is_none() {
-                    hint::spin_loop();
+                    cell.store(id.index() + 1, Ordering::Relaxed);
                 }
-                assert_eq!((**dag.node(id), dag.node(id).edges), (value, edges));
-            }
-            assert_eq!(
-                (**dag.node(own), dag.node(own).edges),
-                (6, &[Edge::Opaque(6)][..])
-            );
+            });
+            scope.spawn(move || {
+                // Publishing from the reader too contends for the frontier with the writer.
+                let own = dag.publish(|| Box::new(6), &[Edge::Opaque(6)]).unwrap();
+                for (cell, &(value, edges)) in handoff.iter().zip(&shapes) {
+                    let id = loop {
+                        match cell.load(Ordering::Relaxed) {
+                            0 => hint::spin_loop(),
+                            id => break Id::new(id - 1),
+                        }
+                    };
+                    while dag.get(id).is_none() {
+                        hint::spin_loop();
+                    }
+                    assert_eq!((**dag.node(id), dag.node(id).edges), (value, edges));
+                }
+                assert_eq!(
+                    (**dag.node(own), dag.node(own).edges),
+                    (6, &[Edge::Opaque(6)][..])
+                );
+            });
         });
-    });
-    assert_eq!(published(dag), 5);
+        assert_eq!(published(dag), 5);
+    }
 }
 
 #[test]
@@ -261,6 +274,181 @@ fn publication_with_no_edge_storage_reads_an_empty_span() {
     let id = bare.publish(|| Box::new(7), &[]).unwrap();
     assert!(bare.node(id).edges.is_empty());
     assert_eq!(**bare.node(id), 7);
+}
+
+#[test]
+fn over_aligned_zero_sized_edges_read_back() {
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[repr(align(64))]
+    struct Z;
+
+    let bare: Dag<Id, Box<u64>, Z> = Dag::with_capacity(1, 0, []);
+    let empty = bare.publish(|| Box::new(0), &[]).unwrap();
+    assert!(bare.node(empty).edges.is_empty());
+    assert!(bare.node(empty).edges.as_ptr().is_aligned());
+
+    let mut dag: Dag<Id, Box<u64>, Z> = Dag::with_capacity(3, 4, []);
+    let garbage = dag.publish(|| Box::new(1), &[Z]).unwrap();
+    let span = dag.publish(|| Box::new(2), &[Z, Z, Z]).unwrap();
+    let empty = dag.publish(|| Box::new(3), &[]).unwrap();
+    dag.pin(span);
+    dag.pin(empty);
+    assert!(dag.node(empty).edges.is_empty());
+    assert_eq!(dag.node(span).edges, [Z, Z, Z]);
+    assert!(dag.node(span).edges.as_ptr().is_aligned());
+    // The live span moves from 1..4 to 0..3. ZST growth increases logical
+    // capacity without requiring a backing allocation to move.
+    dag.maintain(
+        Exhausted::from(NeedGrowth::Edges(1)).forced(),
+        1,
+        |_| None,
+        |_| {},
+        |_, _| 0,
+    );
+    assert!(dag.get(garbage).is_none());
+    assert!(dag.edge_capacity() > 4);
+    assert_eq!(dag.node(span).edges, [Z, Z, Z]);
+    assert!(dag.node(span).edges.as_ptr().is_aligned());
+    assert!(dag.node(empty).edges.is_empty());
+    assert!(dag.node(empty).edges.as_ptr().is_aligned());
+}
+
+// --- concurrent interning ----------------------------------------------------
+
+#[test]
+fn equal_key_candidates_publish_one_canonical_node() {
+    // Both threads hold a published candidate for the same key before either
+    // installs it, so one loses its bucket and reads the winner. Collection drops
+    // the loser, and dropping the arena drops the pinned winner.
+    let mut dag: Arena<Id> = Dag::with_capacity(4, 0, []);
+    let barrier = &Barrier::new(2);
+    let ids: Vec<Id> = thread::scope(|scope| {
+        let dag = &dag;
+        let workers: Vec<_> = (0..2)
+            .map(|_| {
+                scope.spawn(move || {
+                    let value = || {
+                        barrier.wait();
+                        Box::new(7)
+                    };
+                    let id = dag
+                        .intern(node_hash::<Id>(7, &[]), |v, _| **v == 7, value, &[])
+                        .unwrap();
+                    dag.pin(id);
+                    id
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap()).collect()
+    });
+    assert_eq!(ids[0], ids[1]);
+    assert_eq!(published(&dag), 2);
+    let mut reclaimed = Vec::new();
+    dag.maintain(
+        Exhausted::from(NeedGrowth::Nodes),
+        1,
+        Edge::child,
+        |value| reclaimed.push(**value),
+        |value, edges| node_hash(**value, edges),
+    );
+    assert_eq!(reclaimed, [7]);
+    assert_eq!(intern(&dag, 7, &[]), Ok(ids[0]));
+}
+
+/// A heap-owned payload with an independently observed destruction count.
+struct Counted<'a> {
+    data: Box<u64>,
+    drops: &'a AtomicUsize,
+}
+
+impl Drop for Counted<'_> {
+    fn drop(&mut self) {
+        assert_eq!(self.drops.fetch_add(1, Ordering::Relaxed), 0);
+    }
+}
+
+/// Constructs one tracked payload.
+fn counted(n: u64, drops: &AtomicUsize) -> Counted<'_> {
+    Counted {
+        data: Box::new(n),
+        drops,
+    }
+}
+
+#[test]
+fn equality_panic_before_publication_drops_uncalled_capture() {
+    let drops = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    let calls = AtomicUsize::new(0);
+    let dag: Dag<Id, Counted<'_>, u64> = Dag::with_capacity(4, 4, []);
+    let winner = dag
+        .intern(7, |_, _| false, || counted(10, &drops[0]), &[10])
+        .unwrap();
+    dag.pin(winner);
+    let pending = counted(20, &drops[1]);
+    let calls_ref = &calls;
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        dag.intern(
+            7,
+            |_, _| panic!("equality interrupted"),
+            move || {
+                calls_ref.fetch_add(1, Ordering::Relaxed);
+                pending
+            },
+            &[20],
+        )
+    }));
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(drops[1].load(Ordering::Relaxed), 1);
+    assert_eq!(drops[0].load(Ordering::Relaxed), 0);
+    assert_eq!(*dag.node(winner).data, 10);
+    assert_eq!(dag.node(winner).edges, [10]);
+    drop(dag);
+    assert_eq!(drops[0].load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn equality_panic_after_lost_cas_leaves_candidate_owned_by_arena() {
+    let drops = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    let mut dag: Dag<Id, Counted<'_>, u64> = Dag::with_capacity(4, 4, []);
+    let mut winner = None;
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        dag.intern(
+            7,
+            |_, _| panic!("equality interrupted"),
+            || {
+                // Reentrant interning fills the bucket the outer call observed empty,
+                // forcing its CAS to lose before equality panics.
+                let inner = dag
+                    .intern(7, |_, _| false, || counted(10, &drops[0]), &[10])
+                    .unwrap();
+                dag.pin(inner);
+                winner = Some(inner);
+                counted(20, &drops[1])
+            },
+            &[20],
+        )
+    }));
+    assert!(result.is_err());
+    let winner = winner.unwrap();
+    assert_eq!(drops[0].load(Ordering::Relaxed), 0);
+    assert_eq!(drops[1].load(Ordering::Relaxed), 0);
+    let mut reclaimed = Vec::new();
+    dag.maintain(
+        Exhausted::from(NeedGrowth::Nodes),
+        1,
+        |_| None,
+        |v| reclaimed.push(*v.data),
+        |_, _| 7,
+    );
+    assert_eq!(reclaimed, [20]);
+    assert_eq!(drops[1].load(Ordering::Relaxed), 1);
+    assert_eq!(drops[0].load(Ordering::Relaxed), 0);
+    assert_eq!(*dag.node(winner).data, 10);
+    assert_eq!(dag.node(winner).edges, [10]);
+    drop(dag);
+    assert_eq!(drops[0].load(Ordering::Relaxed), 1);
+    assert_eq!(drops[1].load(Ordering::Relaxed), 1);
 }
 
 // --- collection --------------------------------------------------------------
@@ -327,6 +515,31 @@ fn collection_drops_reclaims_and_packs_overlapping_spans() {
     // Dropping the arena drops the pinned values once and skips reclaimed and
     // never-published slots.
     drop(shared);
+}
+
+#[test]
+fn reference_edges_survive_compaction_and_growth() {
+    // Edges move as raw memory. References keep their provenance through an
+    // overlapping compaction and the growth that follows it.
+    let targets = [10, 11, 12, 13];
+    let mut dag: Dag<Id, u64, &u64> = Dag::with_capacity(4, 4, []);
+    let garbage = dag.publish(|| 0, &[&targets[0]]).unwrap();
+    let live = dag
+        .publish(|| 1, &[&targets[1], &targets[2], &targets[3]])
+        .unwrap();
+    dag.pin(live);
+    let capacity = dag.edge_capacity();
+    dag.maintain(
+        Exhausted::from(NeedGrowth::Edges(1)),
+        1,
+        |_| None,
+        |_| {},
+        |v, edges| structural_hash((v, edges)),
+    );
+    assert!(dag.get(garbage).is_none());
+    assert!(dag.edge_capacity() > capacity);
+    let read: Vec<u64> = dag.node(live).edges.iter().map(|&&e| e).collect();
+    assert_eq!(read, [11, 12, 13]);
 }
 
 #[test]
@@ -403,6 +616,32 @@ fn publication_after_a_destructor_panic_discards_reserved_batches() {
 // --- reader and growth coordination ------------------------------------------
 
 #[test]
+fn a_guard_shared_and_released_on_other_threads_admits_growth() {
+    // Two threads read through one guard admitted here, and a third releases it
+    // as maintenance starts. The barrier samples overlap; the admission counter
+    // alone orders release before exclusive access.
+    let shared = &Store::<Id>::shared(4, 4);
+    let id = pinned(shared, 1, &[Edge::Opaque(1)]);
+    let s = shared.read(());
+    thread::scope(|scope| {
+        scope.spawn(|| assert_eq!(**s.dag.node(id), 1));
+        assert_eq!(s.dag.node(id).edges, [Edge::Opaque(1)]);
+    });
+    let barrier = &Barrier::new(2);
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            barrier.wait();
+            assert_eq!(**s.dag.node(id), 1);
+            drop(s);
+        });
+        barrier.wait();
+        fail_with(shared, &[NeedGrowth::Nodes]);
+    });
+    assert_eq!(shared.epoch(), 1);
+    assert_eq!(**shared.read(()).dag.node(id), 1);
+}
+
+#[test]
 fn concurrent_interning_survives_growth_with_owned_values() {
     const KEYS: u64 = 6;
     const ROUNDS: usize = 8;
@@ -430,8 +669,9 @@ fn concurrent_interning_survives_growth_with_owned_values() {
         });
         assert_eq!(ids[0], ids[1]);
         let s = shared.read(());
-        for (k, &id) in ids[0].iter().enumerate() {
-            assert_eq!(**s.dag.node(id), k as u64);
+        for (k, &id) in (0..).zip(&ids[0]) {
+            assert_eq!(**s.dag.node(id), k);
+            assert_eq!(s.dag.node(id).edges, [Edge::Opaque(k)]);
         }
     }
 }
