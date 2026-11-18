@@ -2,8 +2,9 @@
 //!
 //! These tests pin internal invariants that no public behavior shows: the
 //! probe sequence, per-thread region caching, parallel and caller-side table
-//! rebuilds, growth arithmetic, and reader-counter overflow. The public
-//! contract is tested in `tests/dag.rs`.
+//! rebuilds, growth arithmetic, reader-counter overflow and admission, and the
+//! merging of concurrent growth requests. The public contract is tested in
+//! `tests/dag.rs`.
 //!
 //! Fixtures use a value word with opaque edge words. Arena sizes select the
 //! batch and rebuild regimes each test reaches.
@@ -12,8 +13,8 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::panic;
 use std::panic::AssertUnwindSafe;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Barrier, Mutex};
 use std::thread;
 
 use super::{
@@ -169,6 +170,7 @@ fn cached_batches_remain_owned_when_arena_cache_cells_collide() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn concurrent_publication_leaves_less_than_one_unused_node_batch_per_worker() {
     const WORKERS: usize = 4;
     const EACH: usize = 10_000;
@@ -193,6 +195,7 @@ fn concurrent_publication_leaves_less_than_one_unused_node_batch_per_worker() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn colliding_arenas_finish_more_than_2048_alternating_publications() {
     const EACH: usize = 2049;
     let capacity = (EACH * BATCH_MAX).next_power_of_two();
@@ -230,7 +233,10 @@ fn colliding_arenas_finish_more_than_2048_alternating_publications() {
 
 #[test]
 fn edge_spans_larger_than_the_speculative_cap_remain_contiguous() {
-    let dag: Dag<Id, u64, ()> = Dag::with_capacity(2, 1 << 22, []);
+    // Native runs also saturate speculative batch sizing. Miri checks the same
+    // oversized contiguous request with a smaller arena.
+    let capacity = if cfg!(miri) { BATCH_MAX + 1 } else { 1 << 22 };
+    let dag: Dag<Id, u64, ()> = Dag::with_capacity(2, capacity, []);
     let edges = vec![(); BATCH_MAX + 1];
     let id = dag.publish(|| 7, &edges).unwrap();
     assert_eq!(*dag.node(id), 7);
@@ -268,6 +274,32 @@ fn probing_visits_every_bucket_once() {
 // --- collection and maintenance ----------------------------------------------
 
 #[test]
+fn generation_exhaustion_is_permanent() {
+    let mut dag: Arena<Id> = Dag::with_capacity(2, 2, []);
+    dag.generation = u64::MAX;
+    // A caught overflow must leave the generation exhausted, so a later
+    // compaction cannot revalidate a stale reservation.
+    for _ in 0..2 {
+        let panic = panic::catch_unwind(AssertUnwindSafe(|| {
+            dag.maintain(
+                Exhausted::from(NeedGrowth::Nodes),
+                1,
+                |_| None,
+                |_| {},
+                |_, _| 0,
+            );
+        }))
+        .unwrap_err();
+        assert_eq!(
+            panic.downcast_ref::<String>().map(String::as_str),
+            Some("reservation generation overflow")
+        );
+        assert_eq!(dag.generation, u64::MAX);
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn rebuild_across_threads_keeps_every_retained_entry_findable() {
     // Two chunks of retained entries put helpers to work. Check ordinary hashes and
     // deliberate collisions, preserving canonical IDs and the entry count after
@@ -336,6 +368,7 @@ fn rebuild_across_threads_keeps_every_retained_entry_findable() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn a_helper_panic_during_rebuild_reaches_the_maintenance_caller() {
     // Two chunks of retained entries give the insert phase one helper, which
     // panics while the caller's own chunk completes. The one unreferenced node
@@ -391,7 +424,7 @@ fn small_table_rebuild_hashes_on_the_maintenance_caller() {
 
 #[test]
 fn reclaiming_published_nodes_preserves_an_empty_unique_table() {
-    let mut dag: Arena<Id> = Dag::with_capacity(32768, 0, []);
+    let mut dag: Arena<Id> = Dag::with_capacity(2, 0, []);
     let groups = dag.groups.as_ptr();
     let buckets = dag.buckets();
     let id = dag.publish(|| 7, &[]).unwrap();
@@ -500,4 +533,120 @@ fn retry_overflow_rejects_admission_before_calling_the_attempt() {
     assert_eq!(shared.requested.load(Ordering::Relaxed), 0);
     assert_eq!(shared.epoch(), 0);
     counter.store(0, Ordering::Relaxed);
+}
+
+#[test]
+fn a_moved_guard_can_read_and_release_after_maintenance_is_requested() {
+    let shared = &Store::<Id>::shared(2, 2);
+    let id = pinned(shared, 7, &[7]);
+    let guard = shared.read(());
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            // Observe only the request, leaving the admission counter as the
+            // reader-to-writer synchronization for the store access below.
+            while shared.requested.load(Ordering::Relaxed) == 0 {
+                thread::yield_now();
+            }
+            assert_eq!(*guard.dag.node(id), 7);
+            assert_eq!(guard.dag.node(id).edges, [7]);
+            drop(guard);
+        });
+        let mut reason = Some(NeedGrowth::Nodes);
+        shared.retry((), |_| reason.take().map_or(Ok(()), Err));
+    });
+    assert_eq!(shared.epoch(), 1);
+}
+
+#[test]
+fn readers_sharing_a_counter_release_each_admission() {
+    let shared = &Store::<Id>::shared(2, 2);
+    let id = pinned(shared, 7, &[7]);
+    let ready = &Barrier::new(3);
+    let first = &Barrier::new(2);
+    let second = &Barrier::new(2);
+    thread::scope(|scope| {
+        let a = scope.spawn(move || {
+            super::COUNTER.set(0);
+            let guard = shared.read(());
+            ready.wait();
+            first.wait();
+            assert_eq!(*guard.dag.node(id), 7);
+            drop(guard);
+        });
+        scope.spawn(move || {
+            super::COUNTER.set(0);
+            let guard = shared.read(());
+            ready.wait();
+            second.wait();
+            assert_eq!(guard.dag.node(id).edges, [7]);
+            drop(guard);
+        });
+        ready.wait();
+        let initial = shared.readers[0].0.load(Ordering::Relaxed);
+        scope.spawn(move || {
+            // Only the two readers share counter zero in this fixture.
+            super::COUNTER.set(1);
+            let mut reason = Some(NeedGrowth::Nodes);
+            shared.retry((), |_| reason.take().map_or(Ok(()), Err));
+        });
+        while shared.requested.load(Ordering::Relaxed) == 0 {
+            thread::yield_now();
+        }
+        first.wait();
+        let result = a.join();
+        let remaining = shared.readers[0].0.load(Ordering::Relaxed);
+        let epoch = shared.epoch();
+        // Release the waiting reader before an assertion can unwind the scope.
+        second.wait();
+        result.unwrap();
+        assert_eq!(initial, 2);
+        assert_eq!(remaining, 1);
+        assert_eq!(epoch, 0);
+    });
+    assert_eq!(shared.readers[0].0.load(Ordering::Relaxed), 0);
+    assert_eq!(shared.epoch(), 1);
+}
+
+#[test]
+fn concurrent_failures_merge_flags_and_the_largest_edge_span() {
+    struct Passes(Vec<Exhausted>);
+
+    impl Grow for Passes {
+        type Cx<'a> = ();
+
+        fn grow(&mut self, exhausted: Exhausted, (): ()) {
+            self.0.push(exhausted);
+        }
+    }
+
+    let mut shared = Shared::new(Passes(Vec::new()));
+    let ready = &Barrier::new(4);
+    thread::scope(|scope| {
+        let store = &shared;
+        for reason in [
+            NeedGrowth::Nodes,
+            NeedGrowth::Unique,
+            NeedGrowth::Edges(3),
+            NeedGrowth::Edges(9),
+        ] {
+            scope.spawn(move || {
+                let mut failure = Some(reason);
+                store.retry((), |_| {
+                    let Some(exhausted) = failure.take() else {
+                        return Ok(());
+                    };
+                    ready.wait();
+                    Err(exhausted)
+                });
+            });
+        }
+    });
+    assert_eq!(shared.epoch(), 1);
+    let calls = &shared.get_mut().0;
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].flags,
+        super::GROW_NODES | super::GROW_UNIQUE | GROW_EDGES
+    );
+    assert_eq!(calls[0].edge_len, 9);
 }

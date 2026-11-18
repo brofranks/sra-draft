@@ -1294,7 +1294,10 @@ impl<I: Idx, N, E: Copy> Dag<I, N, E> {
 
         // Invalidate reserved ranges before changing their free-list entries or edge
         // layout, including when a reclaim callback or node destructor panics.
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("reservation generation overflow");
         self.free_nodes.clear();
         *self.free_len.get_mut() = 0;
         let mut reclaimed = 0;
@@ -1421,7 +1424,12 @@ impl<I: Idx, N, E: Copy> Dag<I, N, E> {
     /// # Panics
     ///
     /// Panics if `threads` is zero, a traced child does not name a published node,
-    /// or the required capacity exceeds the representation limits.
+    /// the reservation generation is exhausted, or the required capacity exceeds
+    /// the representation limits.
+    ///
+    /// If a callback or node destructor panics, the DAG remains memory-safe,
+    /// but its contents are unspecified. Callers should discard it rather than
+    /// resume operations.
     pub fn maintain(
         &mut self,
         exhausted: Exhausted,
@@ -1542,16 +1550,28 @@ fn counter_index() -> usize {
 #[derive(Debug)]
 #[must_use = "dropping the guard ends this thread's admission"]
 pub struct Read<'a, S> {
-    store: &'a S,
+    /// The admitted store, held as a pointer so no reference to it outlives this
+    /// guard's release. A reference field would stay protected while the guard is
+    /// passed by value, as to `drop`, after the release lets a writer take
+    /// exclusive access.
+    store: *const S,
     counter: &'a AtomicU32,
 }
+
+// SAFETY: the guard acts as a shared reference to the store and to its counter,
+// which any thread may use and release.
+unsafe impl<S: Sync> Send for Read<'_, S> {}
+
+// SAFETY: a shared guard only lends shared references to the store.
+unsafe impl<S: Sync> Sync for Read<'_, S> {}
 
 impl<S> Deref for Read<'_, S> {
     type Target = S;
 
     #[inline(always)]
     fn deref(&self) -> &S {
-        self.store
+        // SAFETY: admission excludes exclusive access until this guard's drop.
+        unsafe { &*self.store }
     }
 }
 
@@ -1690,8 +1710,7 @@ impl<S: Grow> Shared<S> {
                 .expect("reader count overflow");
             if self.requested.load(Ordering::SeqCst) == 0 {
                 return Read {
-                    // SAFETY: admission excludes exclusive access until this reader leaves.
-                    store: unsafe { self.store.as_ref_unchecked() },
+                    store: self.store.get(),
                     counter,
                 };
             }

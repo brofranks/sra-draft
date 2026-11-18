@@ -4,8 +4,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod dag;
 
-/// Allocates a process-unique identity, reserving zero.
+/// Allocates a process-unique identity, reserving zero and `u64::MAX`.
+///
+/// # Panics
+///
+/// Panics if all identities have been allocated. Exhaustion is permanent.
 pub fn fresh_id() -> u64 {
     static IDS: AtomicU64 = AtomicU64::new(1);
-    IDS.fetch_add(1, Ordering::Relaxed)
+    IDS.try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .expect("storage identity overflow")
 }
