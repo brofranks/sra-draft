@@ -1,0 +1,48 @@
+name: Check the BDD preimage fixture
+on:
+  push:
+    branches: [review/bdd-preimage-jetfe6qo]
+permissions:
+  contents: read
+jobs:
+  bdd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt
+      - run: cargo fmt --all -- --check
+      - name: Public BDD tests in debug
+        run: cargo test --locked --test bdd
+      - name: Public BDD tests in release
+        run: cargo test --locked --release --test bdd
+      - name: Omit 0x41 only from the identity map target
+        shell: python3 {0}
+        run: |
+          from pathlib import Path
+          import subprocess
+
+          path = Path("tests/bdd.rs")
+          src = path.read_text()
+          before = "        let q = c.set(&in_q);"
+          after = """        let q = if (clear, flip) == (0, 0) {
+                      set(&*c, in_q.iter().copied().filter(|&x| x != 0x41))
+                  } else {
+                      c.set(&in_q)
+                  };"""
+          assert src.count(before) == 1
+          path.write_text(src.replace(before, after))
+          result = subprocess.run(
+              ["cargo", "test", "--locked", "--test", "bdd",
+               "bit_maps_confined_to_one_level_agree_with_pointwise_maps", "--", "--exact"],
+              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+          )
+          print(result.stdout)
+          assert result.returncode == 101
+          assert "left: [0, 4099, 258112]" in result.stdout
+          assert "right: [0, 65, 4099, 258112]" in result.stdout
+          assert "0 passed; 1 failed" in result.stdout

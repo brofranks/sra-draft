@@ -7,6 +7,7 @@ use std::fmt;
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+pub use crate::cache::StoreCache;
 use crate::idx;
 use crate::scalar::{self, ScalarKind, ScalarSort};
 use crate::util::count::Count;
@@ -33,13 +34,13 @@ idx! {
 }
 
 impl Function {
-    /// The immortal false predicate and trivial partition mapping every value
-    /// to class zero.
+    /// The false predicate and trivial partition mapping every value to class
+    /// zero.
     ///
     /// Every false predicate result must use this token.
     pub const FALSE: Self = Self(0);
 
-    /// The immortal true predicate, relative to the scalar universe.
+    /// The true predicate, relative to the scalar universe.
     ///
     /// Every true predicate result must use this token, which denotes no
     /// canonical partition.
@@ -74,7 +75,7 @@ impl Function {
         self.0 == Self::TRUE.0
     }
 
-    /// Whether this token is one of the immortal constants.
+    /// Whether this token is one of the two constants.
     ///
     /// Every store and container pins both constants, so acquiring or releasing a
     /// reference leaves their counts unchanged.
@@ -231,13 +232,11 @@ impl MapSpec {
                 domain.accepts(clear) && domain.accepts(flip),
                 "bit map masks must encode the scalar sort"
             );
+            assert!(
+                domain.kind() != ScalarKind::Symbol || self.is_identity(),
+                "symbols do not support bitwise maps"
+            );
         }
-        assert!(
-            domain.kind() != ScalarKind::Symbol
-                || !matches!(self, Self::Bits { .. })
-                || self.is_identity(),
-            "symbols do not support bitwise maps"
-        );
     }
 
     /// Writes the image of `x` into `y` and returns whether `x` has an image.
@@ -279,78 +278,6 @@ pub struct Refinement {
 #[derive(Debug, Default)]
 pub struct Values;
 
-/// Entries above which a store cache is cleared, retaining its allocations.
-const CACHE_BOUND: usize = 1 << 20;
-
-/// Whole-call alignment and quotient results cached on one store.
-///
-/// Entries borrow tokens without retaining them, so [`Self::restart`] clears
-/// the cache whenever the store or its maintenance epoch changes.
-#[derive(Debug)]
-pub struct StoreCache {
-    /// The store whose results are cached.
-    pub store: u64,
-    /// The store's maintenance epoch when the cached results were computed.
-    pub epoch: u64,
-    /// Entries above which the cache is cleared, `1 << 20` by default.
-    ///
-    /// This bounds entries rather than retained bytes.
-    pub bound: usize,
-    /// `(left, right)` to `(result, labels start, labels length)` in `labels`.
-    pub aligned: Map<(Function, Function), (Function, usize, usize)>,
-    /// Pairs of input class numbers for each cached alignment, back to back.
-    pub labels: Vec<(u32, u32)>,
-    /// Results keyed by input root and the hash of its class map.
-    ///
-    /// Each entry holds the result root and the start and length of the input
-    /// map in `classes`. A hit compares the full map.
-    pub quotients: Map<(Function, u64), (Function, usize, usize)>,
-    /// The class maps of every cached quotient, back to back.
-    pub classes: Vec<u32>,
-}
-
-impl StoreCache {
-    /// An empty cache cleared once it holds more than `bound` entries.
-    #[inline(always)]
-    pub fn with_bound(bound: usize) -> Self {
-        Self {
-            store: 0,
-            epoch: 0,
-            bound,
-            aligned: Map::default(),
-            labels: Vec::new(),
-            quotients: Map::default(),
-            classes: Vec::new(),
-        }
-    }
-
-    /// Binds the cache to `store` at maintenance epoch `epoch`, clearing every
-    /// entry when either differs from the previous call or the entry count exceeds
-    /// the bound.
-    ///
-    /// Allocations remain available for reuse.
-    #[inline(always)]
-    pub fn restart(&mut self, store: u64, epoch: u64) {
-        if self.store != store
-            || self.epoch != epoch
-            || self.aligned.len() + self.quotients.len() > self.bound
-        {
-            self.aligned.clear();
-            self.labels.clear();
-            self.quotients.clear();
-            self.classes.clear();
-            self.store = store;
-            self.epoch = epoch;
-        }
-    }
-}
-
-impl Default for StoreCache {
-    fn default() -> Self {
-        Self::with_bound(CACHE_BOUND)
-    }
-}
-
 /// Caller-owned working memory for [`Column::align`] and [`Column::quotient`].
 #[derive(Debug, Default)]
 pub struct Alignment {
@@ -367,12 +294,12 @@ pub struct Alignment {
 /// Dropping a suspended cursor releases its root without visiting the remaining
 /// values.
 pub trait Members {
-    /// Replaces `out` with the next member in numeric order, without duplicates,
-    /// and returns whether a member remained.
+    /// Lends the next member in numeric order, or returns `None` at exhaustion.
     ///
-    /// Each member occupies the column's word stride of little-endian words. All
+    /// Members are distinct. The slice holds the column's exact word stride of
+    /// little-endian words and borrows the cursor until its next advance. All
     /// store guards are released before returning.
-    fn next(&mut self, out: &mut Vec<u64>) -> bool;
+    fn next(&mut self) -> Option<&[u64]>;
 }
 
 /// Transfers the finite members of one predicate through `map`, keeping those
@@ -394,13 +321,14 @@ pub fn transfer(
     image: bool,
 ) -> Vec<u64> {
     map.check_domain(domain);
-    let (mut x, mut y, mut out) = (Vec::new(), vec![0; domain.words()], Vec::new());
-    while members.next(&mut x) {
+    let (mut y, mut out) = (Vec::new(), Vec::new());
+    while let Some(x) = members.next() {
         assert!(
-            domain.accepts(&x),
+            domain.accepts(x),
             "cursor member does not encode the scalar sort"
         );
-        if !map.evaluate(&x, &mut y) {
+        y.resize(x.len(), 0);
+        if !map.evaluate(x, &mut y) {
             continue;
         }
         assert!(
@@ -408,7 +336,7 @@ pub fn transfer(
             "map image does not encode the scalar sort"
         );
         if holds(&y) {
-            out.extend_from_slice(if image { &y } else { &x });
+            out.extend_from_slice(if image { &y } else { x });
         }
     }
     if image {
@@ -447,12 +375,13 @@ pub trait Column: Send + Sync {
 
     /// Acquires one external reference to a live root in this store.
     ///
-    /// Constants remain immortal.
+    /// Constants are unaffected.
     fn inc_ref(&self, f: Function);
 
-    /// Releases one external reference to a root in this store.
+    /// Releases one external reference to a root in this store, which the
+    /// caller must own.
     ///
-    /// Constants remain immortal. Other tokens may be reused only after all
+    /// Constants are unaffected. Other tokens may be reused only after all
     /// external and internal owners release them.
     fn dec_ref(&self, f: Function);
 

@@ -11,88 +11,22 @@ use std::sync::Arc;
 use std::thread;
 
 use sra::backend::{
-    Alignment, Backend, BoolOp, Column, Function, MapSpec, Members, Refinement, Values, transfer,
+    Alignment, Backend, BoolOp, Column, Function, MapSpec, Refinement, Values, transfer,
 };
 use sra::bdd::BddStore;
 use sra::scalar::ScalarSort;
 use sra::util::count::Count;
 
-/// One six-bit level, so a diagram is a single node over the terminals.
-const BV4: ScalarSort = ScalarSort::bit_vec(4);
-/// Two levels.
-const BV12: ScalarSort = ScalarSort::bit_vec(12);
-/// Three levels, the shallowest sort whose traversals can reach one node pair
-/// by two routes.
-const BV18: ScalarSort = ScalarSort::bit_vec(18);
+#[path = "support/bdd.rs"]
+mod fixtures;
+#[path = "support/listed.rs"]
+mod listed;
 
-/// Literal encoded points for comparison with finite transfer.
-struct Listed(std::vec::IntoIter<Vec<u64>>);
-
-impl Members for Listed {
-    fn next(&mut self, out: &mut Vec<u64>) -> bool {
-        self.0.next().is_some_and(|value| {
-            *out = value;
-            true
-        })
-    }
-}
-
-/// A store with room for neither a node nor an edge beyond its terminals.
-fn tiny() -> Arc<BddStore> {
-    Arc::new(BddStore::with_capacity(2, 0, 1))
-}
-
-/// A roomy store.
-fn roomy() -> Arc<BddStore> {
-    Arc::new(BddStore::default())
-}
-
-/// The store bound to one sort.
-fn col(store: &Arc<BddStore>, d: ScalarSort) -> Box<dyn Column> {
-    Arc::clone(store).column(d).unwrap()
-}
-
-/// Every member of a predicate over a one-word sort.
-fn members(c: &dyn Column, p: Function) -> Vec<u64> {
-    let mut cursor = c.members(p);
-    let (mut out, mut v) = (Vec::new(), Vec::new());
-    while cursor.next(&mut v) {
-        out.push(v[0]);
-    }
-    out
-}
-
-/// The predicate for the sorted values of a one-word sort.
-fn set(c: &dyn Column, values: impl IntoIterator<Item = u64>) -> Function {
-    c.set(&values.into_iter().collect::<Vec<_>>())
-}
-
-/// The predicate testing `mask` bits of a one-word sort against `value`.
-fn bit(c: &dyn Column, mask: u64, value: u64) -> Function {
-    c.masked_eq(&[mask], &[value])
-}
-
-/// A three-level diagram whose two level-one nodes share both of their
-/// level-two children.
-///
-/// A traversal reaches the same operand pair by two routes and must answer the
-/// second from its memo. The `low` pair names the two accepted low-bit values.
-fn shared(c: &dyn Column, low: (u64, u64)) -> Function {
-    let (hi, mid) = (bit(c, 1 << 12, 0), bit(c, 1 << 6, 0));
-    let (a, b) = (bit(c, 0x3F, low.0), bit(c, 0x3F, low.1));
-    let (yes, no) = (c.ite(mid, a, b), c.ite(mid, b, a));
-    let root = c.ite(hi, yes, no);
-    for f in [hi, mid, a, b, yes, no] {
-        c.dec_ref(f);
-    }
-    root
-}
-
-/// The concrete meaning of [`shared`], as plain integer arithmetic.
-fn shared_holds(low: (u64, u64), x: u64) -> bool {
-    let (hi, mid) = ((x >> 12) & 1 == 0, (x >> 6) & 1 == 0);
-    x & 0x3F == if hi == mid { low.0 } else { low.1 }
-}
+use fixtures::{
+    BV4, BV12, BV18, bit, classes, col, members, residues, roomy, samples, set, shared,
+    shared_holds, tiny,
+};
+use listed::Listed;
 
 /// A partition with the shape of [`shared`]: values in `shared(c, (1, 2))` take
 /// one class, values in `shared(c, (3, 4))` another, and every other value a
@@ -125,35 +59,11 @@ fn numbers_classes(c: &dyn Column, f: Function, label: impl Fn(u64) -> u32) {
     assert!(pairs.len() == labels.len() && pairs.len() == classes.len());
 }
 
-/// Points spread over a three-level sort, for comparing a predicate with its
-/// meaning.
-fn samples() -> impl Iterator<Item = u64> {
-    (0..1 << 18).step_by(701).chain(0..200)
-}
-
-/// The class number of each four-bit value.
-fn classes(c: &dyn Column, f: Function) -> Vec<u32> {
-    (0..16).map(|v| c.evaluate(f, &[v])).collect()
-}
-
-/// The partition labeling values below 16 by their residue modulo `n`, with
-/// label zero elsewhere.
-fn residues(c: &dyn Column, n: u64) -> Function {
-    let cases: Vec<(Function, u32)> = (1..n)
-        .map(|r| (set(c, (0..16).filter(|v| v % n == r)), r as u32))
-        .collect();
-    let root = c.cases(0, &cases, &mut Vec::new());
-    for (f, _) in cases {
-        c.dec_ref(f);
-    }
-    root
-}
-
 // --- binding ----
 
 #[test]
 fn every_scalar_sort_binds_a_column() {
-    let store: Arc<dyn Backend> = roomy();
+    let store: Arc<dyn Backend> = Arc::new(BddStore::default());
     for sort in [
         ScalarSort::bool(),
         ScalarSort::bit_vec(1),
@@ -274,7 +184,7 @@ fn multiword_cuts_and_skipped_levels_have_exact_counts() {
 
 #[test]
 fn wide_singletons_and_complements_have_exact_counts() {
-    let sort = ScalarSort::bit_vec(4096);
+    let sort = ScalarSort::bit_vec(if cfg!(miri) { 130 } else { 4096 });
     let c = col(&roomy(), sort);
     let p = c.set(&vec![0; sort.words()]);
     assert_eq!(c.count(p), 1);
@@ -286,7 +196,7 @@ fn wide_singletons_and_complements_have_exact_counts() {
 
 #[test]
 fn small_domain_counts_match_concrete_sets() {
-    for width in [4, 6, 7, 12] {
+    for width in [4, 6, 7, if cfg!(miri) { 8 } else { 12 }] {
         let c = col(&roomy(), ScalarSort::bit_vec(width));
         let end = 1_u64 << width;
         assert_eq!(c.count(Function::FALSE), 0);
@@ -457,8 +367,8 @@ fn bit_maps_confined_to_one_level_agree_with_pointwise_maps() {
         expect.dedup();
         let image = c.image(&map, p, Function::TRUE);
         assert_eq!(members(&*c, image), expect);
-        let q = set(&*c, expect.iter().copied().step_by(2));
-        let in_q = members(&*c, q);
+        let in_q: Vec<_> = expect.into_iter().step_by(2).collect();
+        let q = c.set(&in_q);
         let expect: Vec<u64> = points
             .into_iter()
             .filter(|&x| in_q.contains(&f(x)))
@@ -490,16 +400,16 @@ fn wide_bit_maps_agree_with_literal_finite_images_and_preimages() {
         (false, preimage, vec![0, 0, 1, 0, 0, 1, 1, 1]),
     ] {
         let mut cursor = c.members(root);
-        let (mut words, mut point) = (Vec::new(), Vec::new());
-        while cursor.next(&mut point) {
-            words.extend_from_slice(&point);
+        let mut words = Vec::new();
+        while let Some(point) = cursor.next() {
+            words.extend_from_slice(point);
         }
         assert_eq!(words, expected);
         assert_eq!(
             transfer(
                 sort,
                 &map,
-                &mut Listed(points.clone().into_iter()),
+                &mut Listed(&points),
                 |value| forward || value == [4, 2],
                 forward,
             ),
@@ -512,6 +422,7 @@ fn wide_bit_maps_agree_with_literal_finite_images_and_preimages() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn bit_maps_preserve_constraints_on_untouched_levels() {
     let store = roomy();
     let c = col(&store, BV18);
@@ -545,6 +456,7 @@ fn small(slack: usize) -> Box<dyn Column> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 #[expect(
     clippy::type_complexity,
     reason = "the paired spec and its reference implementation read better inline"
@@ -568,39 +480,35 @@ fn bit_maps_match_concrete_results_across_small_capacities() {
             |x| (x & !0xFC0) ^ 0x009,
         ),
     ];
-    for (map, eval) in &maps {
+    let input: Vec<u64> = (0..40).map(|i| i * 101 + 1).collect();
+    let allowed: Vec<u64> = (0..40).map(|i| i * 37).chain([3861]).collect();
+    for ((map, eval), pair) in maps.iter().zip([(3940, 3861), (1516, 37)]) {
+        let pairs: Vec<_> = input
+            .iter()
+            .map(|&x| (x, eval(x)))
+            .filter(|(_, y)| allowed.contains(y))
+            .collect();
+        assert_eq!(pairs, [pair]);
         for slack in 0..8 {
-            let build = |c: &dyn Column| {
-                (
-                    set(c, (0..40).map(|i| i * 101 + 1)),
-                    // The last source value has image 3861 under the first map.
-                    set(c, (0..40).map(|i| i * 37).chain([3861])),
-                )
-            };
-            let c = small(slack);
-            let (p, q) = build(&*c);
-            let (in_p, in_q) = (members(&*c, p), members(&*c, q));
-            let mut expect: Vec<u64> = in_p
-                .iter()
-                .map(|&x| eval(x))
-                .filter(|y| in_q.contains(y))
-                .collect();
-            expect.sort_unstable();
-            expect.dedup();
-            assert_eq!(members(&*c, c.image(map, p, q)), expect, "image at {slack}");
-            // A fresh store gives preimage the same initial capacity as image.
-            let c = small(slack);
-            let (p, q) = build(&*c);
-            let expect: Vec<u64> = in_p
-                .iter()
-                .copied()
-                .filter(|&x| in_q.contains(&eval(x)))
-                .collect();
-            assert_eq!(
-                members(&*c, c.preimage(map, p, q)),
-                expect,
-                "preimage at {slack}"
-            );
+            // A fresh store gives both directions the same initial capacity.
+            for forward in [true, false] {
+                let c = small(slack);
+                let p = c.set(&input);
+                let q = c.set(&allowed);
+                let (f, expected) = if forward {
+                    (c.image(map, p, q), pair.1)
+                } else {
+                    (c.preimage(map, p, q), pair.0)
+                };
+                assert_eq!(
+                    members(&*c, f),
+                    [expected],
+                    "slack {slack}, image {forward}"
+                );
+                for root in [p, q, f] {
+                    c.dec_ref(root);
+                }
+            }
         }
     }
 }
@@ -629,7 +537,7 @@ fn malformed_bit_maps_are_rejected_by_symbolic_and_finite_transfer() {
         assert_eq!(payload.downcast_ref::<&str>(), Some(&message));
     };
     for &(sort, clear, flip, message) in masks {
-        let c = col(&tiny(), sort);
+        let c = col(&roomy(), sort);
         let map = MapSpec::Bits {
             clear: clear.into(),
             flip: flip.into(),
@@ -655,7 +563,7 @@ fn malformed_bit_maps_are_rejected_by_symbolic_and_finite_transfer() {
                 };
                 rejects(
                     catch_unwind(AssertUnwindSafe(|| {
-                        transfer(sort, &map, &mut Listed(points.into_iter()), |_| true, image);
+                        transfer(sort, &map, &mut Listed(&points), |_| true, image);
                     })),
                     message,
                 );
@@ -690,6 +598,7 @@ fn a_rust_map_on_a_bdd_is_rejected() {
 // --- alignment ----
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn alignment_shares_pairs_and_splits_below_a_terminal_side() {
     let store = roomy();
     let c = col(&store, BV18);
@@ -801,6 +710,7 @@ fn alignment_of_an_unreferenced_right_partition_is_rejected() {
 // --- quotients ----
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn a_quotient_merges_two_diamond_classes() {
     let store = roomy();
     let c = col(&store, BV18);
@@ -904,6 +814,18 @@ fn a_default_labeled_case_overlapping_an_earlier_case_is_rejected() {
 // --- values ----
 
 #[test]
+fn values_append_only_reachable_labels_after_the_prefix() {
+    let store = roomy();
+    let c = col(&store, ScalarSort::bool());
+    // Both keys are listed, so the default is unreachable and not appended.
+    let mut labels = vec![77];
+    let f = c.values(9, &[0, 1], &[10, 20], &mut labels, &mut Values);
+    assert_eq!(labels, [77, 10, 20]);
+    assert_eq!([c.evaluate(f, &[0]), c.evaluate(f, &[1])], [0, 1]);
+    c.dec_ref(f);
+}
+
+#[test]
 #[should_panic(expected = "values are not packed at the sort's word stride")]
 fn value_keys_off_the_word_stride_are_rejected() {
     let c = col(&roomy(), ScalarSort::bit_vec(70));
@@ -934,9 +856,16 @@ fn values_with_too_few_labels_are_rejected() {
     let _ = col(&roomy(), BV4).values(0, &[1, 2], &[1], &mut Vec::new(), &mut Values);
 }
 
+#[test]
+#[should_panic(expected = "there must be one case label per key")]
+fn empty_values_with_a_case_label_are_rejected() {
+    let _ = col(&tiny(), BV4).values(42, &[], &[7], &mut Vec::new(), &mut Values);
+}
+
 // --- refinement ----
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 fn refinement_cells_match_the_diamond_intersections() {
     let store = roomy();
     let c = col(&store, BV18);
@@ -970,9 +899,14 @@ fn refinement_cells_match_the_diamond_intersections() {
 fn a_shallow_partition_selects_each_class_once_under_a_deep_predicate() {
     let store = tiny();
     let c = col(&store, BV18);
-    let top = bit(&*c, 1 << 17, 1 << 17);
+    let half = 1 << 17;
+    let top = bit(&*c, half, half);
     let f = c.cases(0, &[(top, 1)], &mut Vec::new());
-    let mut points: Vec<u64> = samples().filter(|x| x % 3 == 0).collect();
+    // The multiples of three bordering the split reach both classes.
+    let mut points: Vec<u64> = samples()
+        .filter(|x| x % 3 == 0)
+        .chain([half - 2, half + 1])
+        .collect();
     points.sort_unstable();
     points.dedup();
     let p = set(&*c, points.iter().copied());
@@ -1056,6 +990,25 @@ fn refinement_by_an_unreferenced_predicate_is_rejected() {
 // --- member cursors ----
 
 #[test]
+fn an_empty_wide_cursor_and_transfer_finish_without_visiting_a_value() {
+    let sort = ScalarSort::bit_vec(65_536);
+    let c = col(&tiny(), sort);
+    let mut cursor = c.members(Function::FALSE);
+    let map = MapSpec::Rust(Arc::new(|_, _| panic!("map received a value")));
+    assert!(
+        transfer(
+            sort,
+            &map,
+            &mut *cursor,
+            |_| panic!("filter received a value"),
+            true
+        )
+        .is_empty()
+    );
+    assert_eq!(cursor.next(), None);
+}
+
+#[test]
 fn member_cursors_skip_levels_and_cross_word_boundaries() {
     let store = roomy();
     let c = col(&store, BV12);
@@ -1073,9 +1026,9 @@ fn member_cursors_skip_levels_and_cross_word_boundaries() {
     let sorted = [5, 0, 1 << 60, 0, 5, 1];
     let q = w.set(&sorted);
     let mut cursor = w.members(q);
-    let (mut out, mut v) = (Vec::new(), Vec::new());
-    while cursor.next(&mut v) {
-        out.extend_from_slice(&v);
+    let mut out = Vec::new();
+    while let Some(v) = cursor.next() {
+        out.extend_from_slice(v);
     }
     assert_eq!(out, sorted);
 }

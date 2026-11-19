@@ -115,15 +115,15 @@ pub fn check_packed(sort: ScalarSort, values: &[u64]) {
         values.len().is_multiple_of(words),
         "values are not packed at the sort's word stride"
     );
+    let records = values.chunks_exact(words);
     assert!(
-        values.chunks_exact(words).all(|v| sort.accepts(v)),
-        "value is outside the column sort"
-    );
-    assert!(
-        values
-            .chunks_exact(words)
-            .is_sorted_by(|a, b| compare(a, b).is_lt()),
+        records.clone().is_sorted_by(|a, b| compare(a, b).is_lt()),
         "values are not sorted and distinct"
+    );
+    // Valid encodings form an initial interval, so the largest key suffices.
+    assert!(
+        records.last().is_none_or(|value| sort.accepts(value)),
+        "value is outside the column sort"
     );
 }
 
@@ -165,7 +165,11 @@ pub fn sort_records(packed: &mut Vec<u64>, words: usize) {
     let mut order: Vec<usize> = (0..packed.len() / words).collect();
     order.sort_unstable_by(|&a, &b| compare(record(a), record(b)));
     order.dedup_by(|a, b| record(*a) == record(*b));
-    *packed = order.iter().flat_map(|&i| record(i)).copied().collect();
+    let mut out = Vec::with_capacity(order.len() * words);
+    for &i in &order {
+        out.extend_from_slice(record(i));
+    }
+    *packed = out;
 }
 
 /// Advances one encoded value.
@@ -173,12 +177,9 @@ pub fn sort_records(packed: &mut Vec<u64>, words: usize) {
 /// The input must be a valid encoding of `sort`. Returns false at the end of
 /// the exact finite universe. A false return leaves `value` unspecified.
 pub fn successor(value: &mut [u64], sort: ScalarSort) -> bool {
-    let mut carry = true;
-    for word in value.iter_mut() {
-        (*word, carry) = word.overflowing_add(u64::from(carry));
-        if !carry {
-            break;
-        }
-    }
-    !carry && sort.accepts(value)
+    // Words wrap to zero until the first one that does not, which ends the carry.
+    value.iter_mut().any(|word| {
+        *word = word.wrapping_add(1);
+        *word != 0
+    }) && sort.accepts(value)
 }
