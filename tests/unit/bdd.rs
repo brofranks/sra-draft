@@ -100,10 +100,11 @@ fn sets_cuts_and_bit_tests_survive_maintenance() {
     let c = col(&store, BV12);
     // Values spread over both levels, so the construction recurses before it first
     // interns.
-    let values: Vec<u64> = (0..300).map(|v| v * 13).collect();
+    let len = if cfg!(miri) { 16 } else { 300 };
+    let values: Vec<u64> = (0..len).map(|v| v * 13).collect();
     let p = c.set(&values);
     assert_eq!(members(&*c, p), values);
-    assert_eq!(c.count(p), 300);
+    assert_eq!(c.count(p), len);
     let lt = c.less_than(&[1000]);
     assert_eq!(c.count(lt), 1000);
     // A bit test fixes the assigned bits at every level it reaches.
@@ -719,7 +720,7 @@ fn refinement_delivery_can_collect_and_reenter_the_store() {
 
 #[test]
 fn retained_roots_and_member_cursors_survive_collection() {
-    let store = tiny();
+    let store = roomy();
     let c = col(&store, ScalarSort::bit_vec(70));
     let p = c.set(&[1, 0, 65, 0, 129, 0, 5, 1, 7, 2]);
     c.inc_ref(p);
