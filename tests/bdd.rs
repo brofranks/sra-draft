@@ -456,6 +456,7 @@ fn small(slack: usize) -> Box<dyn Column> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
 #[expect(
     clippy::type_complexity,
     reason = "the paired spec and its reference implementation read better inline"
@@ -488,7 +489,7 @@ fn bit_maps_match_concrete_results_across_small_capacities() {
             .filter(|(_, y)| allowed.contains(y))
             .collect();
         assert_eq!(pairs, [pair]);
-        for slack in (0..8).step_by(if cfg!(miri) { 7 } else { 1 }) {
+        for slack in 0..8 {
             // A fresh store gives both directions the same initial capacity.
             for forward in [true, false] {
                 let c = small(slack);
@@ -536,7 +537,7 @@ fn malformed_bit_maps_are_rejected_by_symbolic_and_finite_transfer() {
         assert_eq!(payload.downcast_ref::<&str>(), Some(&message));
     };
     for &(sort, clear, flip, message) in masks {
-        let c = col(&tiny(), sort);
+        let c = col(&roomy(), sort);
         let map = MapSpec::Bits {
             clear: clear.into(),
             flip: flip.into(),
@@ -886,9 +887,14 @@ fn refinement_cells_match_the_diamond_intersections() {
 fn a_shallow_partition_selects_each_class_once_under_a_deep_predicate() {
     let store = tiny();
     let c = col(&store, BV18);
-    let top = bit(&*c, 1 << 17, 1 << 17);
+    let half = 1 << 17;
+    let top = bit(&*c, half, half);
     let f = c.cases(0, &[(top, 1)], &mut Vec::new());
-    let mut points: Vec<u64> = samples().filter(|x| x % 3 == 0).collect();
+    // The multiples of three bordering the split reach both classes.
+    let mut points: Vec<u64> = samples()
+        .filter(|x| x % 3 == 0)
+        .chain([half - 2, half + 1])
+        .collect();
     points.sort_unstable();
     points.dedup();
     let p = set(&*c, points.iter().copied());
