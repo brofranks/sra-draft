@@ -14,16 +14,16 @@ use std::array;
 use std::cmp::Ordering;
 use std::mem::{self, MaybeUninit};
 use std::ops::ControlFlow;
-use std::slice;
 use std::sync::Arc;
 
 use crate::backend::{
     Alignment, Backend, BoolOp, Column, Function, MapSpec, Members, Refinement, StoreCache, Values,
 };
+use crate::cache;
 use crate::scalar::{self, ScalarKind, ScalarSort};
 use crate::util::count::{self, Count};
 use crate::util::dag::{
-    self, Dag, Exhausted, Grow, Map, NeedGrowth, NodeRef as DagNodeRef, Shared,
+    self, Dag, Exhausted, Grow, Map, NeedGrowth, NodeRef as DagNodeRef, Read, Shared,
 };
 
 /// The number of value bits one level tests.
@@ -37,8 +37,7 @@ const EDGE_CAPACITY: usize = 16_384;
 
 const _: () = assert!(LEVEL_VALUES == u64::BITS as usize);
 
-/// The six-bit levels occupied by one value of `width` bits, starting at level
-/// zero.
+/// The six-bit levels occupied by one scalar sort, starting at level zero.
 ///
 /// Bit 0 of the value sits at position 0 of `last_level`, and higher bits fill
 /// higher positions and then earlier levels, so only level zero may be short.
@@ -46,28 +45,20 @@ const _: () = assert!(LEVEL_VALUES == u64::BITS as usize);
 /// clearing its unused high bits, as normalized by [`State::intern_level`].
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct Span {
-    width: u32,
+    sort: ScalarSort,
 }
 
 impl Span {
-    /// Places a value of `width` bits at the beginning of the BDD level order.
-    ///
-    /// Every scalar sort has a nonzero width, so the span has at least one level.
-    #[inline(always)]
-    const fn new(width: u32) -> Self {
-        Self { width }
-    }
-
-    /// The level holding bit zero of the value.
+    /// The level holding bit zero of the nonempty scalar encoding.
     #[inline(always)]
     const fn last_level(self) -> u32 {
-        self.width.div_ceil(LEVEL_BITS) - 1
+        self.sort.width().div_ceil(LEVEL_BITS) - 1
     }
 
     /// The number of bits of the value that `level` holds.
     #[inline(always)]
     fn reach(self, level: u32) -> u32 {
-        (self.width - (self.last_level() - level) * LEVEL_BITS).min(LEVEL_BITS)
+        (self.sort.width() - (self.last_level() - level) * LEVEL_BITS).min(LEVEL_BITS)
     }
 
     /// The mask of the assignments at `level` that some value reaches.
@@ -220,19 +211,16 @@ impl<T: Copy> LevelBuffer<T> {
     /// The initialized items.
     #[inline(always)]
     fn as_slice(&self) -> &[T] {
-        // SAFETY: `push` initializes each entry before extending `len`, so the
-        // prefix contains valid values. `MaybeUninit<T>` has the layout of `T`,
-        // and the slice borrows this buffer for its lifetime.
-        unsafe { slice::from_raw_parts(self.items.as_ptr().cast::<T>(), self.len) }
+        // SAFETY: `push` initializes each entry before extending `len`.
+        unsafe { self.items[..self.len].assume_init_ref() }
     }
 
     /// The initialized items, exclusively.
     #[inline(always)]
     fn as_mut_slice(&mut self) -> &mut [T] {
-        // SAFETY: the initialized-prefix and layout invariants of `as_slice`
-        // apply. The exclusive borrow prevents other access to the buffer
-        // while the mutable slice exists.
-        unsafe { slice::from_raw_parts_mut(self.items.as_mut_ptr().cast::<T>(), self.len) }
+        // SAFETY: the prefix is initialized as in `as_slice`, and the mutable
+        // borrow grants exclusive access to it.
+        unsafe { self.items[..self.len].assume_init_mut() }
     }
 }
 
@@ -312,12 +300,6 @@ impl State {
             || Node { data },
             edges,
         )
-        .map_err(|need| match need {
-            // A branch may need a whole level of edges, so request that span rather than
-            // this node's and let one growth serve the following nodes too.
-            NeedGrowth::Edges(_) => NeedGrowth::Edges(LEVEL_VALUES),
-            need => need,
-        })
     }
 
     /// The complete level node whose assignment `a` leads to `child(a)`.
@@ -326,13 +308,14 @@ impl State {
     /// reachable assignment they alias.
     fn intern_level(
         &self,
+        span: Span,
         level: u32,
-        reach: u32,
         child: impl Fn(usize) -> Function,
     ) -> Result<Function, NeedGrowth> {
         let mut edges = LevelBuffer::new();
+        let mask = (1 << span.reach(level)) - 1;
         for assignment in 0..LEVEL_VALUES {
-            edges.merge(1 << assignment, child(assignment & ((1 << reach) - 1)));
+            edges.merge(1 << assignment, child(assignment & mask));
         }
         self.intern_node(level, edges.as_slice())
     }
@@ -368,8 +351,8 @@ impl State {
             }
         }
         // Intersecting edge lists can change their order. Sort by first assignment
-        // so result edges and class numbers stay canonical. A full mask preserves
-        // the other operand's edge order, so that case skips the sort.
+        // so result edges and class numbers stay canonical. Already ordered
+        // intersections, including those with a full mask, skip the sort.
         let by_first = |&(mask, _, _): &(u64, Function, Function)| mask.trailing_zeros();
         if !cofactors.as_slice().is_sorted_by_key(by_first) {
             cofactors.as_mut_slice().sort_unstable_by_key(by_first);
@@ -407,10 +390,10 @@ impl State {
         self.intern_node(level, edges.as_slice())
     }
 
-    /// One conditional traversal, including unordered source decisions.
+    /// Combines a Boolean condition and two branches at their earliest level.
     ///
-    /// Ordered literals usually select their children immediately, while
-    /// overlapping levels are cofactored before interning.
+    /// Each nonempty intersection of the three edge masks selects one child
+    /// from each operand. Deeper operands keep their current root at this level.
     fn try_ite(
         &self,
         memo: &mut Memo,
@@ -584,7 +567,7 @@ impl State {
                     *target = self.try_apply_bool(memo, BoolOp::Or, *target, child)?;
                 }
             }
-            self.intern_level(level, span.reach(level), |a| children[a & !level_clear])?
+            self.intern_level(span, level, |a| children[a & !level_clear])?
         };
         memo.remap.insert(f, result);
         Ok(result)
@@ -605,7 +588,7 @@ impl State {
                 continue;
             }
             let expected = span.assignment(level, value) & bits;
-            f = self.intern_level(level, span.reach(level), |v| {
+            f = self.intern_level(span, level, |v| {
                 if v & bits == expected {
                     f
                 } else {
@@ -766,7 +749,7 @@ impl State {
         if keys.is_empty() {
             return Ok(default);
         }
-        let words = span.width.div_ceil(u64::BITS) as usize;
+        let words = span.sort.words();
         let len = keys.len() / words;
         if level > span.last_level() {
             debug_assert_eq!(len, 1, "exactly one key must remain below the last level");
@@ -790,7 +773,7 @@ impl State {
             )?;
             start = end;
         }
-        self.intern_level(level, span.reach(level), |a| children[a])
+        self.intern_level(span, level, |a| children[a])
     }
 
     /// Replaces label terminals with class numbers in order of first appearance.
@@ -866,6 +849,12 @@ impl BddStore {
         }
     }
 
+    /// Admits a reader with this store's maintenance thread budget.
+    #[inline(always)]
+    fn read(&self) -> Read<'_, State> {
+        self.shared.read(self.threads)
+    }
+
     /// Runs `build` until it completes without needing growth, then acquires
     /// one reference to its result.
     #[inline(always)]
@@ -914,9 +903,10 @@ struct BddMembers<'a> {
 }
 
 impl Members for BddMembers<'_> {
-    fn next(&mut self, out: &mut Vec<u64>) -> bool {
-        let store = &self.column.store;
-        let state = store.shared.read(store.threads);
+    fn next(&mut self) -> Option<&[u64]> {
+        self.stack.last()?;
+        self.value.resize(self.column.sort().words(), 0);
+        let state = self.column.store.read();
         while let Some((level, f, next)) = self.stack.last_mut() {
             if *next >= u64::from(u64::BITS) {
                 self.stack.pop();
@@ -947,14 +937,12 @@ impl Members for BddMembers<'_> {
             };
             self.column.span.assign(*level, assignment, &mut self.value);
             if *level == self.column.span.last_level() {
-                out.clear();
-                out.extend_from_slice(&self.value);
-                return true;
+                return Some(&self.value);
             }
             let next_level = *level + 1;
             self.stack.push((next_level, child, 0));
         }
-        false
+        None
     }
 }
 
@@ -967,7 +955,6 @@ impl Drop for BddMembers<'_> {
 /// A BDD store bound to one scalar sort, with the level span its width needs.
 struct BddColumn {
     store: Arc<BddStore>,
-    sort: ScalarSort,
     span: Span,
 }
 
@@ -975,8 +962,7 @@ impl Backend for BddStore {
     /// Every scalar sort is a bit string over as many levels as its width needs.
     fn column(self: Arc<Self>, sort: ScalarSort) -> Option<Box<dyn Column>> {
         Some(Box::new(BddColumn {
-            span: Span::new(sort.width()),
-            sort,
+            span: Span { sort },
             store: self,
         }))
     }
@@ -985,7 +971,7 @@ impl Backend for BddStore {
 impl Column for BddColumn {
     /// The bound scalar sort.
     fn sort(&self) -> ScalarSort {
-        self.sort
+        self.span.sort
     }
 
     /// Increments the manually managed external reference count of a live function.
@@ -994,7 +980,7 @@ impl Column for BddColumn {
     /// reference. The caller must balance each call with [`Self::dec_ref`].
     fn inc_ref(&self, f: Function) {
         if !f.is_constant() {
-            self.store.shared.read(self.store.threads).inc_ref(f);
+            self.store.read().inc_ref(f);
         }
     }
 
@@ -1003,15 +989,18 @@ impl Column for BddColumn {
     /// Reclamation is deferred to growth-triggered collection.
     fn dec_ref(&self, f: Function) {
         if !f.is_constant() {
-            self.store.shared.read(self.store.threads).dec_ref(f);
+            self.store.read().dec_ref(f);
         }
     }
 
     /// The terminal of `f` at one value of the bound sort.
     fn evaluate(&self, mut f: Function, value: &[u64]) -> u32 {
-        assert!(self.sort.accepts(value), "value is outside the column sort");
+        assert!(
+            self.sort().accepts(value),
+            "value is outside the column sort"
+        );
         let span = self.span;
-        let state = self.store.shared.read(self.store.threads);
+        let state = self.store.read();
         debug_assert!(state.has_refs(f), "cannot use an unreferenced BDD node");
         loop {
             let node = state.node(f);
@@ -1034,10 +1023,10 @@ impl Column for BddColumn {
             return Count::ZERO;
         }
         if p.is_t() {
-            return Count::from(1) << self.sort.width();
+            return Count::from(1) << self.sort().width();
         }
         let span = self.span;
-        let state = self.store.shared.read(self.store.threads);
+        let state = self.store.read();
         debug_assert!(state.has_refs(p), "cannot use an unreferenced BDD node");
         // Counts start at a node's own level, and an incoming edge supplies the
         // skipped bits.
@@ -1058,10 +1047,6 @@ impl Column for BddColumn {
         let mut stack = vec![(p, 0)];
         'nodes: while let Some((f, next)) = stack.last_mut() {
             let f = *f;
-            if memo.contains_key(&f) {
-                stack.pop();
-                continue;
-            }
             let node = state.node(f);
             assert!(!node.is_terminal(), "count requires a Boolean predicate");
             // Every edge intersects the reachable assignments: `intern_level` aliases
@@ -1098,18 +1083,21 @@ impl Column for BddColumn {
             while sum.last() == Some(&0) {
                 sum.pop();
             }
+            // The root's digits are already in the result buffer.
+            if f == p {
+                break;
+            }
             memo.insert(f, (pool.len(), sum.len()));
             pool.extend_from_slice(&sum);
             stack.pop();
         }
-        let (i, len) = memo[&p];
-        Count::from_digits(pool[i..i + len].to_vec()) << (self.sort.width() - bits(p))
+        Count::from_digits(sum) << (self.sort().width() - bits(p))
     }
 
     /// Returns one owned predicate holding exactly where the value takes one of
     /// the sorted, distinct `values`.
     fn set(&self, values: &[u64]) -> Function {
-        scalar::check_packed(self.sort, values);
+        scalar::check_packed(self.sort(), values);
         self.store
             .owned(|state| state.try_values(self.span, 0, values, &|_| 1, 0, Function::FALSE))
     }
@@ -1122,22 +1110,23 @@ impl Column for BddColumn {
     /// `bound` is outside the sort.
     fn less_than(&self, bound: &[u64]) -> Function {
         assert_ne!(
-            self.sort.kind(),
+            self.sort().kind(),
             ScalarKind::Symbol,
             "symbols have no numeric ordering"
         );
-        assert!(self.sort.accepts(bound), "bound is outside the column sort");
+        assert!(
+            self.sort().accepts(bound),
+            "bound is outside the column sort"
+        );
         let span = self.span;
         self.store.owned(|state| {
             let mut f = Function::FALSE;
             for level in (0..=span.last_level()).rev() {
                 let limit = span.assignment(level, bound);
-                f = state.intern_level(level, span.reach(level), |value| {
-                    match value.cmp(&limit) {
-                        Ordering::Less => Function::TRUE,
-                        Ordering::Equal => f,
-                        Ordering::Greater => Function::FALSE,
-                    }
+                f = state.intern_level(span, level, |value| match value.cmp(&limit) {
+                    Ordering::Less => Function::TRUE,
+                    Ordering::Equal => f,
+                    Ordering::Greater => Function::FALSE,
                 })?;
             }
             Ok(f)
@@ -1166,12 +1155,12 @@ impl Column for BddColumn {
     /// `mask`.
     fn masked_eq(&self, mask: &[u64], value: &[u64]) -> Function {
         assert_ne!(
-            self.sort.kind(),
+            self.sort().kind(),
             ScalarKind::Symbol,
             "symbols do not support bit predicates"
         );
         assert!(
-            self.sort.accepts(mask) && self.sort.accepts(value),
+            self.sort().accepts(mask) && self.sort().accepts(value),
             "bit test is outside the column sort"
         );
         assert!(
@@ -1191,7 +1180,7 @@ impl Column for BddColumn {
     ///
     /// Panics if `map` is invalid over the bound sort or is a Rust closure.
     fn image(&self, map: &MapSpec, p: Function, q: Function) -> Function {
-        map.check_domain(self.sort);
+        map.check_domain(self.sort());
         let (clear, flip) = bit_map(map);
         if p.is_f() || q.is_f() || map.is_identity() {
             return self.apply_bool(BoolOp::And, p, q);
@@ -1221,7 +1210,7 @@ impl Column for BddColumn {
     ///
     /// Panics if `map` is invalid over the bound sort or is a Rust closure.
     fn preimage(&self, map: &MapSpec, p: Function, q: Function) -> Function {
-        map.check_domain(self.sort);
+        map.check_domain(self.sort());
         let (clear, flip) = bit_map(map);
         if p.is_f() || q.is_constant() || map.is_identity() {
             return self.apply_bool(BoolOp::And, p, q);
@@ -1278,8 +1267,6 @@ impl Column for BddColumn {
             !left.is_f() && !right.is_f(),
             "cannot align a trivial partition"
         );
-        // Numbering classes in order of first appearance gives a canonical result.
-        let start = labels.len();
         let cache = &mut scratch.cache;
         self.store.owned(|state| {
             debug_assert!(
@@ -1287,22 +1274,10 @@ impl Column for BddColumn {
                 "cannot use an unreferenced BDD node"
             );
             self.store.restart_cache(cache);
-            // A retried attempt appends its labels afresh.
-            labels.truncate(start);
-            if let Some(&(result, at, len)) = cache.aligned.get(&(left, right)) {
-                labels.extend_from_slice(&cache.labels[at..at + len]);
-                return Ok(result);
-            }
-            scratch.memo.clear();
-            let result = state.try_align(&mut scratch.memo, labels, start, left, right)?;
-            // A retry refreshes the cache for the current maintenance epoch
-            // before inserting this result.
-            let at = cache.labels.len();
-            cache.labels.extend_from_slice(&labels[start..]);
-            cache
-                .aligned
-                .insert((left, right), (result, at, labels.len() - start));
-            Ok(result)
+            cache::align(cache, (left, right), labels, |labels, start| {
+                scratch.memo.clear();
+                state.try_align(&mut scratch.memo, labels, start, left, right)
+            })
         })
     }
 
@@ -1331,18 +1306,10 @@ impl Column for BddColumn {
         self.store.owned(|state| {
             debug_assert!(state.has_refs(f), "cannot use an unreferenced BDD node");
             self.store.restart_cache(cache);
-            if let Some(&(result, at, len)) = cache.quotients.get(&key)
-                && cache.classes[at..at + len] == *classes
-            {
-                return Ok(result);
-            }
-            scratch.map.clear();
-            let result = state.try_map(&mut scratch.map, f, &mut |i| classes[i as usize])?;
-            // This replaces a cached entry if two class maps share a hash.
-            let at = cache.classes.len();
-            cache.classes.extend_from_slice(classes);
-            cache.quotients.insert(key, (result, at, classes.len()));
-            Ok(result)
+            cache::quotient(cache, key, classes, || {
+                scratch.map.clear();
+                state.try_map(&mut scratch.map, f, &mut |i| classes[i as usize])
+            })
         })
     }
 
@@ -1354,6 +1321,10 @@ impl Column for BddColumn {
     /// Panics if overlapping cases carry different labels.
     fn cases(&self, default: u32, cases: &[(Function, u32)], labels: &mut Vec<u32>) -> Function {
         // Each class number indexes its case label in the appended suffix.
+        if cases.is_empty() {
+            labels.push(default);
+            return Function::FALSE;
+        }
         self.store.owned(|state| {
             debug_assert!(
                 cases.iter().all(|&(p, _)| state.has_refs(p)),
@@ -1408,12 +1379,16 @@ impl Column for BddColumn {
         labels: &mut Vec<u32>,
         _: &mut Values,
     ) -> Function {
-        scalar::check_packed(self.sort, keys);
+        scalar::check_packed(self.sort(), keys);
         assert_eq!(
             case_labels.len(),
-            keys.len() / self.sort.words(),
+            keys.len() / self.sort().words(),
             "there must be one case label per key"
         );
+        if keys.is_empty() {
+            labels.push(default);
+            return Function::FALSE;
+        }
         self.store.owned(|state| {
             let f = state.try_values(
                 self.span,
@@ -1443,7 +1418,7 @@ impl Column for BddColumn {
     ) -> ControlFlow<()> {
         if p.is_f() {
             debug_assert!(
-                self.store.shared.read(self.store.threads).has_refs(f),
+                self.store.read().has_refs(f),
                 "cannot use an unreferenced BDD node"
             );
             return ControlFlow::Continue(());
@@ -1454,7 +1429,7 @@ impl Column for BddColumn {
         seen.clear();
         loop {
             let class = 'class: {
-                let state = self.store.shared.read(self.store.threads);
+                let state = self.store.read();
                 debug_assert!(
                     state.has_refs(f) && state.has_refs(p),
                     "cannot use an unreferenced BDD node"
@@ -1504,14 +1479,14 @@ impl Column for BddColumn {
     /// the root until dropped.
     fn members(&self, p: Function) -> Box<dyn Members + '_> {
         debug_assert!(
-            self.store.shared.read(self.store.threads).has_refs(p),
+            self.store.read().has_refs(p),
             "cannot use an unreferenced BDD node"
         );
         self.inc_ref(p);
         Box::new(BddMembers {
             column: self,
             root: p,
-            value: vec![0; self.sort.words()],
+            value: Vec::new(),
             stack: if p.is_f() {
                 Vec::new()
             } else {
