@@ -1,0 +1,17 @@
+
+#[test]
+fn manual_operation_counts() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let c = col(&roomy(), ScalarSort::bit_vec(6));
+    let p = bit(&*c, 1, 1);
+    super::REVIEW_EDGES.store(0, Relaxed);
+    assert_eq!(members(&*c, p), (1..64).step_by(2).collect::<Vec<_>>());
+    let scanned = super::REVIEW_EDGES.load(Relaxed);
+    super::REVIEW_OWNED.store(0, Relaxed);
+    let empty = c.set(&[]);
+    assert_eq!(empty, Function::FALSE);
+    let owned = super::REVIEW_OWNED.load(Relaxed);
+    eprintln!("OBS edge lookups={scanned} empty-set admissions={owned}");
+    c.dec_ref(empty);
+    c.dec_ref(p);
+}

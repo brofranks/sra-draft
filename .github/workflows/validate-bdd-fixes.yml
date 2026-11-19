@@ -1,0 +1,22 @@
+name: BDD fix validation
+on:
+  push:
+    branches: [review/bdd-fixes-a7d98d1b]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        probe: [cache, word-count, label-offset, filter, cursor-set, allocations, oracle]
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - run: python3 review-probes/run.py ${{ matrix.probe }}
