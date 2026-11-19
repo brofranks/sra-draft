@@ -1,0 +1,22 @@
+name: Terra BDD review evidence
+on:
+  push:
+    branches: [review/bdd-terra-087c-ite]
+permissions:
+  contents: read
+jobs:
+  shortcut:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [true-condition, false-condition, equal-branches, identity]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - run: python3 terra_review.py ${{ matrix.variant }}
