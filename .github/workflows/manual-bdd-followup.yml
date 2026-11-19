@@ -1,0 +1,22 @@
+name: Packed keys and partition fixtures
+on:
+  push:
+    branches: [review/bdd-manual-9d5a8f32-followup]
+permissions:
+  contents: read
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        probe: [word-count, label-offset, partition-fixtures]
+    env:
+      RUSTUP_TOOLCHAIN: 1.100.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal
+      - run: python3 review-probes/run.py ${{ matrix.probe }}

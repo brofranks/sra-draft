@@ -1,0 +1,17 @@
+use sra::backend::{Backend, Values};
+use sra::bdd::BddStore;
+use sra::scalar::ScalarSort;
+use std::sync::Arc;
+
+#[test]
+fn wide_keys_take_one_label_per_record() {
+    let c = Arc::new(BddStore::with_capacity(128, 512, 1))
+        .column(ScalarSort::bit_vec(65)).unwrap();
+    let mut labels = vec![77];
+    let f = c.values(9, &[1, 0, 0, 1, 1, 1], &[8, 6, 8], &mut labels, &mut Values);
+    assert_eq!(labels, [77, 9, 8, 6]);
+    for (x, class) in [([0, 0], 0), ([1, 0], 1), ([0, 1], 2), ([1, 1], 1), ([2, 1], 0)] {
+        assert_eq!(c.evaluate(f, &x), class);
+    }
+    c.dec_ref(f);
+}

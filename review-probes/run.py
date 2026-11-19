@@ -141,5 +141,68 @@ elif mode == "oracle":
         assert_eq!(labels, first);""")
     run(["cargo", "test", "--locked", "--test", "bdd", "alignment_shares_pairs_and_splits_below_a_terminal_side", "--", "--exact"])
     print("OBS independent full-domain alignment fixture passed", flush=True)
+elif mode in ("word-count", "label-offset"):
+    path = "src/bdd.rs"
+    if mode == "word-count":
+        old = "            keys.len() / self.sort().words(),"
+        new = "            keys.len(),"
+        diagnostic = "there must be one case label per key"
+    else:
+        old = "                offset + start,"
+        new = "                offset + start * words,"
+        diagnostic = "index out of bounds"
+    replace(path, old, new)
+    suite()
+    print("OBS wide-record mutant survived all original native debug and release tests", flush=True)
+    replace(path, new, old)
+    shutil.copy(root / "wide.rs.in", "tests/manual_wide.rs")
+    cmd = ["cargo", "test", "--locked", "--test", "manual_wide"]
+    run(cmd)
+    replace(path, old, new)
+    run(cmd, diagnostic)
+    print("OBS valid wide-record fixture passed on original and detected mutant", flush=True)
+
+elif mode == "partition-fixtures":
+    # Test the independent alignment assertions as well as the quotient reduction.
+    run([sys.executable, __file__, "oracle"])
+    path = "tests/bdd.rs"
+    replace(path, "use std::collections::HashSet;\n", "")
+    source = Path(path).read_text()
+    replace(path, source[source.index("/// Checks that concrete labels"):source.index("// --- binding")], "")
+    replace(path, "    numbers_classes(&*c, d, diamond_case);\n", "")
+    replace(path, """    let first = c.evaluate(d, &[0]);
+    let class_map: Vec<u32> = (0..3).map(|i| u32::from(i != first)).collect();
+    let q = c.quotient(d, &class_map, &mut Alignment::default());
+    numbers_classes(&*c, q, |x| u32::from(diamond_case(x) != 0));""",
+    """    let q = c.quotient(d, &[0, 1, 1], &mut Alignment::default());
+    for x in samples() {
+        let class = diamond_case(x);
+        assert_eq!(c.evaluate(d, &[x]), class);
+        assert_eq!(c.evaluate(q, &[x]), u32::from(class != 0));
+    }""")
+    replace(path, """    assert_eq!(c.cases(0, &[(p, 1)], &mut labels), p);""",
+        """    let reused = c.cases(0, &[(p, 1)], &mut labels);
+    assert_eq!(reused, p);
+    c.dec_ref(reused);""")
+    replace(path, """        [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    );
+}""", """        [0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    );
+    for g in [p, q, f] {
+        c.dec_ref(g);
+    }
+}""")
+    replace(path, """    assert_eq!(members(&*c, preimage), expect);
+}
+
+/// A twelve-bit column""", """    assert_eq!(members(&*c, preimage), expect);
+    for g in [hi, low, p, image, preimage] {
+        c.dec_ref(g);
+    }
+}
+
+/// A twelve-bit column""")
+    suite()
+    print("OBS direct class oracles and balanced fixture references passed", flush=True)
 else:
     raise ValueError(mode)
