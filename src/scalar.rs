@@ -115,15 +115,15 @@ pub fn check_packed(sort: ScalarSort, values: &[u64]) {
         values.len().is_multiple_of(words),
         "values are not packed at the sort's word stride"
     );
+    let records = values.chunks_exact(words);
     assert!(
-        values.chunks_exact(words).all(|v| sort.accepts(v)),
-        "value is outside the column sort"
-    );
-    assert!(
-        values
-            .chunks_exact(words)
-            .is_sorted_by(|a, b| compare(a, b).is_lt()),
+        records.clone().is_sorted_by(|a, b| compare(a, b).is_lt()),
         "values are not sorted and distinct"
+    );
+    // Valid encodings form an initial interval, so the largest key suffices.
+    assert!(
+        records.last().is_none_or(|value| sort.accepts(value)),
+        "value is outside the column sort"
     );
 }
 

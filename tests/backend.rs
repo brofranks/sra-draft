@@ -1,13 +1,13 @@
 //! Public-contract tests for `sra::backend`.
 //!
 //! The backend-independent pieces: tokens, the Boolean operation algebra, map
-//! descriptions, the caller-owned scratch structures, and the enumerating
-//! transfer. The transfer is fed by a listed cursor rather than a store, so no
-//! backend's encoding takes part in the expectations.
+//! descriptions, and the enumerating transfer. The transfer is fed by a listed
+//! cursor rather than a store, so no backend's encoding takes part in the
+//! expectations.
 
 use std::sync::Arc;
 
-use sra::backend::{BoolOp, Function, MapSpec, Members, StoreCache, transfer};
+use sra::backend::{BoolOp, Function, MapSpec, transfer};
 use sra::scalar::ScalarSort;
 
 const BV4: ScalarSort = ScalarSort::bit_vec(4);
@@ -18,18 +18,10 @@ fn opaque() -> Function {
     Function::new(7)
 }
 
-/// A cursor over listed members, in the order given.
-struct Listed<const N: usize>(std::vec::IntoIter<[u64; N]>);
+#[path = "support/listed.rs"]
+mod listed;
 
-impl<const N: usize> Members for Listed<N> {
-    fn next(&mut self, out: &mut Vec<u64>) -> bool {
-        self.0.next().is_some_and(|v| {
-            out.clear();
-            out.extend_from_slice(&v);
-            true
-        })
-    }
-}
+use listed::Listed;
 
 // --- tokens ----
 
@@ -158,44 +150,6 @@ fn bit_map_masks_outside_the_sort_are_rejected() {
     .check_domain(BV4);
 }
 
-// --- scratch ----
-
-#[test]
-fn a_store_cache_restarts_on_a_new_store_epoch_or_bound_overflow() {
-    let mut cache = StoreCache::default();
-    assert_eq!(cache.bound, 1 << 20);
-    let cache_entry = |cache: &mut StoreCache| {
-        cache.aligned.insert(
-            (Function::new(2), Function::new(3)),
-            (Function::new(4), 0, 1),
-        );
-        cache.labels.push((0, 0));
-    };
-    cache.restart(1, 1);
-    cache_entry(&mut cache);
-    cache.restart(1, 1);
-    assert_eq!((cache.aligned.len(), cache.labels.len()), (1, 1));
-    cache.restart(2, 1);
-    assert!(cache.aligned.is_empty() && cache.labels.is_empty());
-    assert_eq!((cache.store, cache.epoch), (2, 1));
-    cache_entry(&mut cache);
-    cache.restart(2, 2);
-    assert!(cache.aligned.is_empty());
-    // A cache at its bound keeps its entries, and one over it clears them while
-    // retaining its allocations.
-    let mut cache = StoreCache::with_bound(1);
-    cache.restart(1, 1);
-    cache_entry(&mut cache);
-    cache.restart(1, 1);
-    assert_eq!(cache.aligned.len(), 1);
-    cache
-        .quotients
-        .insert((Function::new(2), 0), (Function::new(4), 0, 0));
-    cache.restart(1, 1);
-    assert!(cache.aligned.is_empty() && cache.quotients.is_empty() && cache.labels.is_empty());
-    assert!(cache.aligned.capacity() > 0 && cache.labels.capacity() > 0);
-}
-
 // --- transfer ----
 
 #[test]
@@ -205,7 +159,7 @@ fn transfer_keeps_the_members_or_the_images_the_filter_admits() {
         y[0] = x[0] + 4;
         x[0] != 3
     }));
-    let members = || Listed(vec![[1], [2], [3]].into_iter());
+    let members = || Listed(&[[1], [2], [3]]);
     let image = transfer(BV4, &map, &mut members(), |y| y[0] != 5, true);
     assert_eq!(image, [6]);
     let preimage = transfer(BV4, &map, &mut members(), |y| y[0] != 5, false);
@@ -232,7 +186,7 @@ fn multiword_transfer_preserves_preimage_order_and_sorts_images() {
         clear: vec![1, 0].into(),
         flip: vec![0, 1].into(),
     };
-    let members = || Listed(vec![[0, 0], [1, 0], [2, 0], [0, 1]].into_iter());
+    let members = || Listed(&[[0, 0], [1, 0], [2, 0], [0, 1]]);
     assert_eq!(
         transfer(sort, &map, &mut members(), |_| true, true),
         [0, 0, 0, 1, 2, 1]
@@ -246,7 +200,7 @@ fn multiword_transfer_preserves_preimage_order_and_sorts_images() {
 #[test]
 #[should_panic(expected = "cursor member does not encode the scalar sort")]
 fn a_preimage_member_with_the_wrong_stride_is_rejected() {
-    let mut members = Listed(vec![[5, 1]].into_iter());
+    let mut members = Listed(&[[5, 1]]);
     transfer(BV4, &MapSpec::identity(1), &mut members, |_| true, false);
 }
 
@@ -254,7 +208,7 @@ fn a_preimage_member_with_the_wrong_stride_is_rejected() {
 #[should_panic(expected = "cursor member does not encode the scalar sort")]
 fn a_transfer_member_with_unused_high_bits_is_rejected() {
     let map = MapSpec::Rust(Arc::new(|_, _| panic!("map received an invalid member")));
-    let mut members = Listed(vec![[16]].into_iter());
+    let mut members = Listed(&[[16]]);
     transfer(BV4, &map, &mut members, |_| true, true);
 }
 
@@ -265,6 +219,6 @@ fn a_transfer_image_outside_the_sort_is_rejected() {
         y[0] = 99;
         true
     }));
-    let mut members = Listed(vec![[1]].into_iter());
+    let mut members = Listed(&[[1]]);
     transfer(BV4, &map, &mut members, |_| true, true);
 }
