@@ -1,0 +1,27 @@
+use std::sync::Arc;
+use sra::backend::{Alignment, Backend};
+use sra::bdd::BddStore;
+use sra::scalar::ScalarSort;
+
+#[test]
+fn a_later_alignment_hit_returns_its_own_labels() {
+    let c = Arc::new(BddStore::with_capacity(128, 512, 1))
+        .column(ScalarSort::bit_vec(4)).unwrap();
+    let a = c.set(&[1]);
+    let b = c.set(&[2]);
+    let both = c.set(&[1, 2]);
+    let mut scratch = Alignment::default();
+    let mut pairs = Vec::new();
+    let first = c.align(a, b, &mut pairs, &mut scratch);
+    assert_eq!(pairs, [(0, 0), (1, 0), (0, 1)]);
+    pairs.clear();
+    let second = c.align(a, both, &mut pairs, &mut scratch);
+    assert_eq!(pairs, [(0, 0), (1, 1), (0, 1)]);
+    let mut again = vec![(9, 9)];
+    let hit = c.align(a, both, &mut again, &mut scratch);
+    assert_eq!(hit, second);
+    assert_eq!(again, [(9, 9), (0, 0), (1, 1), (0, 1)], "wrong cached suffix");
+    for f in [a, b, both, first, second, hit] {
+        c.dec_ref(f);
+    }
+}

@@ -1,0 +1,45 @@
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use sra::scalar::sort_records;
+use sra::util::count::Count;
+
+struct Meter;
+static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+// SAFETY: Each operation forwards its original arguments to System.
+unsafe impl GlobalAlloc for Meter {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        CALLS.fetch_add(1, Relaxed);
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, n: usize) -> *mut u8 {
+        CALLS.fetch_add(1, Relaxed);
+        unsafe { System.realloc(ptr, layout, n) }
+    }
+}
+
+#[global_allocator]
+static METER: Meter = Meter;
+
+fn main() {
+    let mut packed = black_box(vec![57, 1]);
+    CALLS.store(0, Relaxed);
+    sort_records(black_box(&mut packed), 2);
+    let sort_allocs = CALLS.load(Relaxed);
+    assert_eq!(packed, [57, 1]);
+    println!("OBS singleton sort allocations={sort_allocs}");
+    for n in [1, 64] {
+        let rhs = black_box(Count::from_digits(vec![11; n]));
+        let expected = rhs.clone();
+        let mut acc = black_box(Count::ZERO);
+        CALLS.store(0, Relaxed);
+        acc += rhs;
+        let count_allocs = CALLS.load(Relaxed);
+        assert_eq!(acc, expected);
+        println!("OBS count limbs={n} allocations={count_allocs}");
+    }
+}

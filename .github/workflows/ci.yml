@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, review/bdd-manual-9d5a8f32]
   pull_request:
   workflow_dispatch:
 
