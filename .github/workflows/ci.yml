@@ -21,3 +21,19 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install nightly --profile minimal --component miri,rust-src
       - run: python3 .github/time_miri.py ${{ matrix.shard }}
+  allocation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal
+      - run: |
+          mkdir -p "$RUNNER_TEMP/baseline"
+          git archive 90930da92cc5458cb2799cb98f2051a02eab97f6 | tar -x -C "$RUNNER_TEMP/baseline"
+          mkdir -p "$RUNNER_TEMP/baseline/examples" examples
+          cp .github/empty.rs "$RUNNER_TEMP/baseline/examples/empty.rs"
+          cp .github/empty.rs examples/empty.rs
+          cargo +stable run --quiet --locked --release --manifest-path "$RUNNER_TEMP/baseline/Cargo.toml" --example empty -- 2
+          cargo +stable run --quiet --locked --release --example empty -- 0

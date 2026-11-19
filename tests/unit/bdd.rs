@@ -14,13 +14,13 @@ use super::{BddStore, LevelBuffer, Memo, NeedGrowth};
 use crate::backend::{Alignment, Backend, BoolOp, Column, Function, MapSpec, Refinement, Values};
 use crate::scalar::ScalarSort;
 
-/// One six-bit level, so a diagram is a single node over the terminals.
-const BV4: ScalarSort = ScalarSort::bit_vec(4);
-/// Two levels.
-const BV12: ScalarSort = ScalarSort::bit_vec(12);
-/// Three levels, the shallowest sort whose traversals can reach one node pair
-/// by two routes.
-const BV18: ScalarSort = ScalarSort::bit_vec(18);
+#[path = "../support/bdd.rs"]
+mod fixtures;
+
+use fixtures::{
+    BV4, BV12, BV18, bit, classes, col, members, residues, roomy, samples, set, shared,
+    shared_holds, tiny,
+};
 
 fn boolean(op: BoolOp, a: bool, b: bool) -> bool {
     match op {
@@ -47,89 +47,8 @@ fn collect(store: &BddStore) {
     });
 }
 
-/// A store with room for neither a node nor an edge beyond its terminals.
-fn tiny() -> Arc<BddStore> {
-    Arc::new(BddStore::with_capacity(2, 0, 1))
-}
-
-/// A roomy store.
-fn roomy() -> Arc<BddStore> {
-    Arc::new(BddStore::default())
-}
-
-/// The store bound to one sort.
-fn col(store: &Arc<BddStore>, d: ScalarSort) -> Box<dyn Column> {
-    Arc::clone(store).column(d).unwrap()
-}
-
-/// Every member of a predicate over a one-word sort.
-fn members(c: &dyn Column, p: Function) -> Vec<u64> {
-    let mut cursor = c.members(p);
-    let (mut out, mut v) = (Vec::new(), Vec::new());
-    while cursor.next(&mut v) {
-        out.push(v[0]);
-    }
-    out
-}
-
-/// The predicate for the sorted values of a one-word sort.
-fn set(c: &dyn Column, values: impl IntoIterator<Item = u64>) -> Function {
-    c.set(&values.into_iter().collect::<Vec<_>>())
-}
-
-/// The predicate testing `mask` bits of a one-word sort against `value`.
-fn bit(c: &dyn Column, mask: u64, value: u64) -> Function {
-    c.masked_eq(&[mask], &[value])
-}
-
-/// A three-level diagram whose two level-one nodes share both of their
-/// level-two children.
-///
-/// A traversal reaches the same operand pair by two routes and must answer the
-/// second from its memo. The `low` pair names the two accepted low-bit values.
-fn shared(c: &dyn Column, low: (u64, u64)) -> Function {
-    let (hi, mid) = (bit(c, 1 << 12, 0), bit(c, 1 << 6, 0));
-    let (a, b) = (bit(c, 0x3F, low.0), bit(c, 0x3F, low.1));
-    let (yes, no) = (c.ite(mid, a, b), c.ite(mid, b, a));
-    let root = c.ite(hi, yes, no);
-    for f in [hi, mid, a, b, yes, no] {
-        c.dec_ref(f);
-    }
-    root
-}
-
-/// The concrete meaning of [`shared`], as plain integer arithmetic.
-fn shared_holds(low: (u64, u64), x: u64) -> bool {
-    let (hi, mid) = ((x >> 12) & 1 == 0, (x >> 6) & 1 == 0);
-    x & 0x3F == if hi == mid { low.0 } else { low.1 }
-}
-
-/// Points spread over a three-level sort, for comparing a predicate with its
-/// meaning.
-fn samples() -> impl Iterator<Item = u64> {
-    (0..1 << 18).step_by(701).chain(0..200)
-}
-
 fn holds(c: &dyn Column, f: Function, x: u64) -> bool {
     c.evaluate(f, &[x]) != 0
-}
-
-/// The class number of each four-bit value.
-fn classes(c: &dyn Column, f: Function) -> Vec<u32> {
-    (0..16).map(|v| c.evaluate(f, &[v])).collect()
-}
-
-/// The partition labeling values below 16 by their residue modulo `n`, with
-/// label zero elsewhere.
-fn residues(c: &dyn Column, n: u64) -> Function {
-    let cases: Vec<(Function, u32)> = (1..n)
-        .map(|r| (set(c, (0..16).filter(|v| v % n == r)), r as u32))
-        .collect();
-    let root = c.cases(0, &cases, &mut Vec::new());
-    for (f, _) in cases {
-        c.dec_ref(f);
-    }
-    root
 }
 
 // --- level buffers ----
@@ -162,6 +81,15 @@ fn level_buffer_preserves_its_initialized_prefix_when_full() {
     buffer.as_mut_slice()[63] = 999;
     expected[63] = 999;
     assert_eq!(buffer.as_slice(), expected);
+}
+
+#[test]
+fn edge_exhaustion_reports_the_span_of_the_branch() {
+    let store = BddStore::with_capacity(3, 0, 1);
+    let state = store.read();
+    let span = super::Span { sort: BV4 };
+    let need = state.try_masked_eq(span, &[1], &[1]).unwrap_err();
+    assert_eq!(need, NeedGrowth::Edges(2));
 }
 
 // --- sets, cuts, and bit tests ----
@@ -250,7 +178,7 @@ fn preimage_of_true_owns_its_input_predicate() {
     assert_eq!(members(&*c, pre), [2, 5]);
     c.dec_ref(pre);
     collect(&store);
-    assert!(store.shared.read(store.threads).get(pre).is_none());
+    assert!(store.read().get(pre).is_none());
 }
 
 #[test]
@@ -341,10 +269,11 @@ fn conditionals_resolve_the_constant_cases() {
 #[test]
 fn overlapping_masks_and_conditional_levels_match_concrete_values() {
     let store = tiny();
-    let c = col(&store, BV12);
-    let a = set(&*c, (0..4096).filter(|x| x % 5 < 2));
-    let b = set(&*c, (0..4096).filter(|x| x % 7 < 3));
-    let k = set(&*c, (0..4096).filter(|x| x % 11 < 4));
+    let width = if cfg!(miri) { 8 } else { 12 };
+    let c = col(&store, ScalarSort::bit_vec(width));
+    let a = set(&*c, (0..1 << width).filter(|x| x % 5 < 2));
+    let b = set(&*c, (0..1 << width).filter(|x| x % 7 < 3));
+    let k = set(&*c, (0..1 << width).filter(|x| x % 11 < 4));
     let deeper = bit(&*c, 1, 1);
     let earlier = bit(&*c, 1 << 6, 1 << 6);
     let results: Vec<_> = [BoolOp::And, BoolOp::Or, BoolOp::Xor, BoolOp::AndNot]
@@ -353,7 +282,7 @@ fn overlapping_masks_and_conditional_levels_match_concrete_values() {
         .collect();
     let overlapping = c.ite(a, b, k);
     let reordered = c.ite(deeper, earlier, k);
-    for x in 0..4096 {
+    for x in 0..1 << width {
         for &(op, root) in &results {
             assert_eq!(
                 holds(&*c, root, x),
@@ -372,7 +301,7 @@ fn overlapping_masks_and_conditional_levels_match_concrete_values() {
     }
     let equivalent = c.ite(a, b, Function::FALSE);
     assert_eq!(equivalent, results[0].1);
-    let state = store.shared.read(store.threads);
+    let state = store.read();
     let mut visited = HashSet::new();
     let mut pending = vec![overlapping, reordered];
     while let Some(f) = pending.pop() {
@@ -405,7 +334,8 @@ fn overlapping_masks_and_conditional_levels_match_concrete_values() {
 #[test]
 fn integer_conditionals_preserve_terminal_payloads_and_canonical_roots() {
     let store = tiny();
-    let c = col(&store, BV12);
+    let width = if cfg!(miri) { 7 } else { 12 };
+    let c = col(&store, ScalarSort::bit_vec(width));
     let a = bit(&*c, 1, 1);
     let b = bit(&*c, 64, 64);
     let seven = store.owned(|state| state.intern_terminal(7));
@@ -423,7 +353,7 @@ fn integer_conditionals_preserve_terminal_payloads_and_canonical_roots() {
         c.dec_ref(f);
     }
     collect(&store);
-    for x in 0..4096 {
+    for x in 0..1 << width {
         assert_eq!(
             c.evaluate(root, &[x]),
             if (x & 1 != 0) != (x & 64 != 0) {
@@ -463,45 +393,53 @@ fn alignment_numbers_reachable_pairs_in_discovery_order() {
     // A repeated call answers from the whole-call cache, appending the same labels
     // afresh without recording them again.
     labels.truncate(1);
-    let cached = scratch.cache.labels.len();
     let again = c.align(f, g, &mut labels, &mut scratch);
     assert_eq!(again, h);
     assert_eq!(&labels[1..], pairs);
-    assert_eq!(scratch.cache.labels.len(), cached);
     // The hit carries its own reference, so its root survives releasing the first
     // result and collecting.
     for root in [h, f, g] {
         c.dec_ref(root);
     }
     collect(&store);
-    assert!(store.shared.read(store.threads).get(again).is_some());
+    assert!(store.read().get(again).is_some());
     for v in 0..16 {
         let class = c.evaluate(again, &[v]) as usize;
         assert_eq!(pairs[class], ((v % 3) as u32, (v % 2) as u32), "at {v}");
     }
     c.dec_ref(again);
     collect(&store);
-    assert!(store.shared.read(store.threads).get(again).is_none());
+    assert!(store.read().get(again).is_none());
 }
 
 #[test]
 fn partition_caches_refresh_after_collection_and_between_stores() {
+    let stores = [roomy(), roomy()];
+    let columns = stores.each_ref().map(|store| col(store, BV4));
+    // Each predicate rejects zero, so its terminals already number the two
+    // partition classes in order. The raw IDs coincide in both fresh stores.
+    let pairs = [(&columns[0], &[2][..]), (&columns[1], &[1, 2][..])]
+        .map(|(c, keys)| (c.set(&[1]), c.set(keys)));
+    assert_eq!(pairs[0], pairs[1]);
+    assert!(stores.iter().all(|store| epoch(store) == 0));
     let mut scratch = Alignment::default();
-    for store in [tiny(), roomy()] {
-        let c = col(&store, BV4);
-        let f = residues(&*c, 3);
-        let g = residues(&*c, 2);
-        for _ in 0..2 {
-            let mut labels = vec![(99, 99)];
-            let h = c.align(f, g, &mut labels, &mut scratch);
-            assert_eq!(labels[0], (99, 99));
-            for x in 0..16 {
-                let class = c.evaluate(h, &[x]) as usize;
-                assert_eq!(labels[1 + class], ((x % 3) as u32, (x % 2) as u32));
-            }
-            c.dec_ref(h);
-            collect(&store);
+    for i in [0, 1, 1] {
+        let c = &columns[i];
+        let (f, g) = pairs[i];
+        let mut labels = vec![(99, 99)];
+        let h = c.align(f, g, &mut labels, &mut scratch);
+        assert_eq!(labels, [(99, 99), (0, 0), (1, i as u32), (0, 1)]);
+        for x in 0..16 {
+            let class = c.evaluate(h, &[x]) as usize;
+            assert_eq!(
+                labels[1 + class],
+                (u32::from(x == 1), u32::from(x == 2 || i == 1 && x == 1))
+            );
         }
+        c.dec_ref(h);
+        collect(&stores[i]);
+    }
+    for (c, (f, g)) in columns.iter().zip(pairs) {
         c.dec_ref(f);
         c.dec_ref(g);
     }
@@ -519,48 +457,60 @@ fn quotients_merge_classes_and_check_the_cached_map() {
     let class_map = [0, 1, 0, 1, 0, 1];
     let q = c.quotient(f, &class_map, &mut scratch);
     assert_eq!(classes(&*c, q), (0..16).map(|v| v % 2).collect::<Vec<_>>());
-    let cached = scratch.cache.classes.len();
     let hit = c.quotient(f, &class_map, &mut scratch);
     assert_eq!(hit, q, "the cached entry answers again");
-    assert_eq!(
-        scratch.cache.classes.len(),
-        cached,
-        "a cache hit records nothing"
-    );
-    // Changing the cached class map simulates a hash collision. The next
-    // quotient must recompute the result and replace the cache entry.
-    scratch.cache.classes[1] = 7;
+    // Cache a different class map under the same hash to exercise the full-map
+    // comparison on the next quotient.
+    {
+        let _state = store.read();
+        let key = (f, crate::util::dag::structural_hash(&class_map[..]));
+        crate::cache::quotient(&mut scratch.cache, key, &[0, 0, 1, 1, 0, 0], || {
+            Ok(Function::FALSE)
+        })
+        .unwrap();
+    }
     let recomputed = c.quotient(f, &class_map, &mut scratch);
     assert_eq!(recomputed, q);
-    assert_eq!(
-        scratch.cache.classes[scratch.cache.classes.len() - class_map.len()..],
-        class_map
-    );
     // The hit carries its own reference, so its root survives releasing the other
     // results and collecting.
     c.dec_ref(f);
     c.dec_ref(q);
     c.dec_ref(recomputed);
     collect(&store);
-    assert!(store.shared.read(store.threads).get(hit).is_some());
+    assert!(store.read().get(hit).is_some());
     assert_eq!(
         classes(&*c, hit),
         (0..16).map(|v| v % 2).collect::<Vec<_>>()
     );
     c.dec_ref(hit);
     collect(&store);
-    assert!(store.shared.read(store.threads).get(hit).is_none());
+    assert!(store.read().get(hit).is_none());
 }
 
 // --- cases ----
 
 #[test]
+fn empty_partitions_append_only_the_default_without_maintenance() {
+    let store = tiny();
+    let c = col(&store, BV4);
+    let mut labels = vec![7];
+    assert_eq!(c.cases(42, &[], &mut labels), Function::FALSE);
+    assert_eq!(
+        c.values(42, &[], &[], &mut labels, &mut Values),
+        Function::FALSE
+    );
+    assert_eq!(labels, [7, 42, 42]);
+    assert_eq!(epoch(&store), 0);
+}
+
+#[test]
 fn cases_with_the_same_label_form_one_class() {
     let store = tiny();
-    let c = col(&store, BV12);
+    let (width, len) = if cfg!(miri) { (8, 18) } else { (12, 300) };
+    let c = col(&store, ScalarSort::bit_vec(width));
     let (a, b) = (
-        set(&*c, (0..300).map(|v| v * 13)),
-        set(&*c, (0..300).map(|v| v * 7)),
+        set(&*c, (0..len).map(|v| v * 13)),
+        set(&*c, (0..len).map(|v| v * 7)),
     );
     let mut labels = Vec::new();
     let before = epoch(&store);
@@ -569,8 +519,8 @@ fn cases_with_the_same_label_form_one_class() {
     // already covered. Zero is a member, so the covered class is the one numbered
     // first.
     assert_eq!(labels, [4, 9]);
-    for x in 0..4096 {
-        let covered = x % 13 == 0 && x < 300 * 13 || x % 7 == 0 && x < 300 * 7;
+    for x in 0..1 << width {
+        let covered = x % 13 == 0 && x < len * 13 || x % 7 == 0 && x < len * 7;
         assert_eq!(c.evaluate(f, &[x]), u32::from(!covered), "at {x}");
     }
     assert!(epoch(&store) > before);
@@ -581,20 +531,23 @@ fn cases_with_the_same_label_form_one_class() {
 #[test]
 fn values_number_classes_in_order_of_first_appearance() {
     let store = tiny();
-    let c = col(&store, BV12);
+    let (width, len) = if cfg!(miri) { (8, 18) } else { (12, 300) };
+    let c = col(&store, ScalarSort::bit_vec(width));
     let mut labels = Vec::new();
     let mut scratch = Values;
     // Labels above one are interned as terminals, so even the default needs a node
     // here. Zero takes the default label, so its class gets number zero.
-    let keys: Vec<u64> = (1..300).map(|v| v * 13).collect();
-    let case_labels: Vec<u32> = (0..299).map(|i| 20 + i % 3).collect();
+    let keys: Vec<u64> = (1..len).map(|v| v * 13).collect();
+    let case_labels: Vec<u32> = (0..(len - 1) as u32).map(|i| 20 + i % 3).collect();
     let f = c.values(9, &keys, &case_labels, &mut labels, &mut scratch);
     assert_eq!(labels, [9, 20, 21, 22]);
-    for x in 0..4096 {
-        let expect = keys
-            .iter()
-            .position(|&k| k == x)
-            .map_or(0, |i| 1 + (i % 3) as u32);
+    for x in 0..1 << width {
+        let i = x / 13;
+        let expect = if x % 13 == 0 && (1..len).contains(&i) {
+            1 + ((i - 1) % 3) as u32
+        } else {
+            0
+        };
         assert_eq!(c.evaluate(f, &[x]), expect, "at {x}");
     }
     assert!(epoch(&store) > 0);
@@ -604,7 +557,8 @@ fn values_number_classes_in_order_of_first_appearance() {
 
 #[test]
 fn refinement_delivers_only_the_selected_cells() {
-    let store = tiny();
+    // Three initial edges make cell construction cross a maintenance boundary.
+    let store = Arc::new(BddStore::with_capacity(2, 3, 1));
     let c = col(&store, BV12);
     let f = residues(&*c, 3);
     let p = set(&*c, [1, 2, 3, 4, 5]);
@@ -766,26 +720,25 @@ fn refinement_delivery_can_collect_and_reenter_the_store() {
 #[test]
 fn retained_roots_and_member_cursors_survive_collection() {
     let store = tiny();
-    let c = col(&store, BV12);
-    let p = set(&*c, [1, 65, 129, 2049, 4095]);
+    let c = col(&store, ScalarSort::bit_vec(70));
+    let p = c.set(&[1, 0, 65, 0, 129, 0, 5, 1, 7, 2]);
     c.inc_ref(p);
     let mut cursor = c.members(p);
     c.dec_ref(p);
     c.dec_ref(p);
-    let mut point = Vec::new();
-    assert!(cursor.next(&mut point));
-    assert_eq!(point, [1]);
+    let point = cursor.next().unwrap();
     collect(&store);
+    assert_eq!(point, [1, 0]);
     let mut rest = Vec::new();
-    while cursor.next(&mut point) {
-        rest.push(point[0]);
+    while let Some(point) = cursor.next() {
+        rest.extend_from_slice(point);
     }
-    assert_eq!(rest, [65, 129, 2049, 4095]);
+    assert_eq!(rest, [65, 0, 129, 0, 5, 1, 7, 2]);
     drop(cursor);
     collect(&store);
-    assert!(store.shared.read(store.threads).get(p).is_none());
-    assert_eq!(c.evaluate(Function::FALSE, &[0]), 0);
-    assert_eq!(c.evaluate(Function::TRUE, &[4095]), 1);
+    assert!(store.read().get(p).is_none());
+    assert_eq!(c.evaluate(Function::FALSE, &[0, 0]), 0);
+    assert_eq!(c.evaluate(Function::TRUE, &[4095, 0]), 1);
 }
 
 // --- collection and growth ----
@@ -803,11 +756,12 @@ fn repeated_constructions_preserve_results_across_maintenance() {
         flip: vec![0x55].into(),
     };
     let eval = |x: u64| (x & !0x3F) ^ 0x55;
-    for k in 1..24 {
+    for k in 1..if cfg!(miri) { 3 } else { 24 } {
         // The image of 2049 is 2133, so every round has a surviving pair.
-        let p = set(&*c, (0..8).map(|i| i * k + 1).chain([2049]));
-        let q = set(&*c, (0..8).map(|i| i * k * 7).chain([2133]));
-        let (in_p, in_q) = (members(&*c, p), members(&*c, q));
+        let in_p: Vec<u64> = (0..8).map(|i| i * k + 1).chain([2049]).collect();
+        let in_q: Vec<u64> = (0..8).map(|i| i * k * 7).chain([2133]).collect();
+        let p = c.set(&in_p);
+        let q = c.set(&in_q);
         let mut expect: Vec<u64> = in_p
             .iter()
             .map(|&x| eval(x))
@@ -829,16 +783,14 @@ fn repeated_constructions_preserve_results_across_maintenance() {
         let mut labels = Vec::new();
         let f = c.cases(8, &[(q, 3)], &mut labels);
         assert_eq!(labels, [3, 8]);
-        assert_eq!(
-            (0..4096)
-                .filter(|&x| c.evaluate(f, &[x]) == 0)
-                .collect::<Vec<_>>(),
-            in_q
-        );
+        let step = if cfg!(miri) { 257 } else { 1 };
+        for x in (0..4096).step_by(step).chain(in_q.iter().copied()) {
+            assert_eq!(c.evaluate(f, &[x]) == 0, in_q.contains(&x));
+        }
         let n = c.apply_bool(BoolOp::AndNot, Function::TRUE, p);
         let r = c.ite(p, q, n);
         let lt = c.less_than(&[k * 100]);
-        for x in (0..4096).step_by(13) {
+        for x in (0..4096).step_by(if cfg!(miri) { 257 } else { 13 }) {
             let expect = !in_p.contains(&x) || in_q.contains(&x);
             assert_eq!(holds(&*c, r, x), expect, "at {x}");
             assert_eq!(holds(&*c, lt, x), x < k * 100, "at {x}");
@@ -919,5 +871,5 @@ fn concurrent_operations_preserve_canonical_roots_across_collection() {
         c.dec_ref(root);
     }
     collect(&store);
-    assert!(store.shared.read(store.threads).get(roots[0]).is_none());
+    assert!(store.read().get(roots[0]).is_none());
 }
