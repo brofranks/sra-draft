@@ -1,0 +1,46 @@
+name: BDD advisory checks
+on:
+  push:
+    branches: [lint/bdd-12777bb-d8jofppc]
+permissions:
+  contents: read
+jobs:
+  checks:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {profile: parent, os: ubuntu-24.04-arm, rust: 1.100.0, components: 'rustfmt,clippy'}
+          - {profile: layer, os: ubuntu-24.04-arm, rust: 1.100.0, components: 'rustfmt,clippy'}
+          - {profile: stable-lines, os: ubuntu-latest, rust: 1.100.0, components: llvm-tools-preview}
+          - {profile: nightly-branches, os: ubuntu-latest, rust: nightly-2026-11-19, components: llvm-tools-preview}
+          - {profile: nightly-unit, os: ubuntu-latest, rust: nightly-2026-11-19, components: llvm-tools-preview}
+          - {profile: focused-miri, os: ubuntu-latest, rust: nightly-2026-11-19, components: 'miri,rust-src'}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+      COMPONENTS: ${{ matrix.components }}
+      PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 6
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component "$COMPONENTS"
+      - if: matrix.components == 'llvm-tools-preview'
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 2 https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz -o llvm-cov.tar.gz
+          echo 'b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a  llvm-cov.tar.gz' | sha256sum -c -
+          mkdir -p lint-bin
+          tar xzf llvm-cov.tar.gz -C lint-bin
+          echo "$RUNNER_TEMP/lint-bin" >> "$GITHUB_PATH"
+      - run: python3 review-lints/run.py "$PROFILE"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: ${{ matrix.profile }}
+          path: lint-results/
+          if-no-files-found: error
+          retention-days: 10
