@@ -43,6 +43,8 @@ if mode == "allocations":
     print("exact capacity", flush=True)
     run("cargo", "run", "--locked", "--release", "--example", "review_allocations")
 else:
+    if mode == "collision":
+        src = Path("src/cache.rs")
     original = src.read_text()
     if mode == "hits":
         old = "            self.store.restart_cache(cache);"
@@ -52,11 +54,16 @@ else:
             ("alignment_numbers_reachable_pairs_in_discovery_order", "warm alignment rebuilt"),
             ("quotients_merge_classes_and_check_the_cached_map", "warm quotient rebuilt"),
         ]
-    else:
+    elif mode == "epoch":
         old = "            self.store.restart_cache(cache);\n            cache::quotient"
         changed = "            cache::quotient"
         count = 1
         cases = [("review_quotient_restarts_after_collection", "cannot reference a reclaimed DAG node")]
+    else:
+        old = "if let Some(&(result, at, len)) = cache.quotients.get(&key)\n        && cache.classes[at..at + len] == *classes"
+        changed = "if let Some(&(result, _, _)) = cache.quotients.get(&key)"
+        count = 1
+        cases = [("quotients_merge_classes_and_check_the_cached_map", "forced collision returned old root")]
 
     replace(src, old, changed, count)
     print("Current suite on mutant", flush=True)
@@ -71,6 +78,9 @@ else:
             statement = f"    let {binding} = {call};"
             replace(fixture, statement, f"    scratch.{field}.clear();\n" + statement
                     + f'\n    assert!(scratch.{field}.is_empty(), "{marker}");')
+    elif mode == "collision":
+        statement = "        crate::cache::quotient(&mut scratch.cache, key, &[0, 0, 1, 1, 0, 0], || {\n            Ok(Function::FALSE)\n        })\n        .unwrap();"
+        replace(fixture, statement, '        assert_eq!(\n' + statement.strip()[:-1] + ',\n            Function::FALSE, "forced collision returned old root"\n        );')
     else:
         with fixture.open("a") as out:
             out.write("""
