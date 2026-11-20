@@ -1,0 +1,42 @@
+name: Sparse 04 fixes Miri
+on: push
+permissions:
+  contents: read
+jobs:
+  sparse:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
+        borrows: [stacked, tree]
+    name: Sparse (${{ matrix.target }}, ${{ matrix.borrows }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-11-19
+      MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check ${{ matrix.borrows == 'tree' && '-Zmiri-tree-borrows' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src
+      - run: >-
+          cargo miri test --locked --target ${{ matrix.target }} --lib --
+          sparse::tests:: backend::tests::
+      - run: cargo miri test --locked --target ${{ matrix.target }} --test sparse
+  whole-tree:
+    name: Whole suite (x86_64, tree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-11-19
+      MIRIFLAGS: -Zmiri-strict-provenance -Zmiri-symbolic-alignment-check -Zmiri-tree-borrows
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src
+      - run: cargo miri test --locked --target x86_64-unknown-linux-gnu
+      - run: >-
+          MIRIFLAGS="$MIRIFLAGS -Zmiri-many-seeds=1..8"
+          cargo miri test --locked --test soundness --target x86_64-unknown-linux-gnu
