@@ -297,6 +297,10 @@ impl Groups {
     ///
     /// Asks `select` on the first reach of a class after restart and sets the
     /// accepted group's initial payload. Declined classes yield `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the class lookup exceeds the platform's vector capacity.
     #[inline(always)]
     pub fn group(
         &mut self,
@@ -306,7 +310,10 @@ impl Groups {
     ) -> Option<&mut Vec<u64>> {
         let idx = class as usize;
         if self.classes.len() <= idx {
-            self.classes.resize(idx + 1, UNREACHED);
+            let len = idx
+                .checked_add(1)
+                .expect("class lookup length exceeds usize");
+            self.classes.resize(len, UNREACHED);
         }
         let i = self.classes[idx];
         if i == DECLINED {

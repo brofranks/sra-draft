@@ -71,6 +71,22 @@ fn refinement_restart_clears_classes_after_a_selector_panic() {
 }
 
 #[test]
+#[cfg(target_pointer_width = "32")]
+fn an_unrepresentable_class_leaves_grouping_reusable() {
+    let mut r = Groups::default();
+    r.group(1, 1, &mut |_| true).unwrap().push(8);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            r.group(u32::MAX, 0, &mut |_| true);
+        }))
+        .is_err()
+    );
+    r.restart();
+    assert_eq!(r.reached(), 0);
+    assert!(r.group(1, 0, &mut |_| true).unwrap().is_empty());
+}
+
+#[test]
 fn sparse_refinement_sizes_scratch_by_reached_classes() {
     let c = Arc::new(SparseStore::with_capacity(2, 0, 1))
         .column(ScalarSort::bit_vec(6))
