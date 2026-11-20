@@ -1,0 +1,43 @@
+
+// Scratch probe for the seven independently releasable operands.
+#[test]
+#[cfg(debug_assertions)]
+fn coverage_released_operands() {
+    let map = MapSpec::Bits {
+        clear: vec![0].into(),
+        flip: vec![1].into(),
+    };
+    let mut accepted = Vec::new();
+    for name in [
+        "image(p)", "image(q)", "preimage(p)", "preimage(q)",
+        "ite(condition)", "ite(yes)", "ite(no)",
+    ] {
+        let c = col(&roomy(), BV4);
+        let released = c.set(&[1]);
+        let live = c.set(&[2]);
+        c.dec_ref(released);
+        let result = catch_unwind(AssertUnwindSafe(|| match name {
+            "image(p)" => c.image(&map, released, live),
+            "image(q)" => c.image(&map, live, released),
+            "preimage(p)" => c.preimage(&map, released, live),
+            "preimage(q)" => c.preimage(&map, live, released),
+            "ite(condition)" => c.ite(released, live, live),
+            "ite(yes)" => c.ite(Function::FALSE, released, live),
+            "ite(no)" => c.ite(Function::TRUE, live, released),
+            _ => unreachable!(),
+        }));
+        match result {
+            Err(error) => assert_eq!(
+                error.downcast_ref::<&str>(),
+                Some(&"cannot use an unreferenced BDD node"),
+                "{name}",
+            ),
+            Ok(result) => {
+                accepted.push(name);
+                c.dec_ref(result);
+            }
+        }
+        c.dec_ref(live);
+    }
+    assert!(accepted.is_empty(), "accepted released operands {accepted:?}");
+}

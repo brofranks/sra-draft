@@ -1,0 +1,25 @@
+
+// Scratch probe with distinct valid node keys in one probe sequence.
+#[test]
+fn coverage_distinct_nodes_with_one_hash() {
+    use super::{Edge, Node};
+    let store = BddStore::with_capacity(16, 16, 1);
+    let state = store.read();
+    let mask = 0x5555_5555_5555_5555;
+    let edges = [
+        Edge { mask, child: Function::FALSE },
+        Edge { mask: !mask, child: Function::TRUE },
+    ];
+    let other = [
+        Edge { mask, child: Function::TRUE },
+        Edge { mask: !mask, child: Function::FALSE },
+    ];
+    let level = 1_u32;
+    let hash = crate::util::dag::structural_hash((level, edges.as_slice()));
+    let other_level = state.intern(hash, |_, _| false, || Node { data: 0 }, &edges).unwrap();
+    let other_edges = state.intern(hash, |_, _| false, || Node { data: level }, &other).unwrap();
+    let result = state.intern_node(level, &edges).unwrap();
+    assert_ne!(result, other_level, "merged different levels");
+    assert_ne!(result, other_edges, "merged different edges");
+    assert_eq!(state.intern_node(level, &edges), Ok(result));
+}
