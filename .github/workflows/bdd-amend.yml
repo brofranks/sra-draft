@@ -1,0 +1,63 @@
+name: BDD amendment checks
+
+on:
+  push:
+    branches: [verify/bdd-coverage-3af3bab-vj4n28l3]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.profile }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {profile: native, os: ubuntu-24.04-arm, rust: 1.100.0, components: 'rustfmt,clippy'}
+          - {profile: coverage, os: ubuntu-latest, rust: nightly-2026-11-19, components: llvm-tools-preview}
+          - {profile: ignore-level, os: ubuntu-latest, rust: 1.100.0}
+          - {profile: ignore-edges, os: ubuntu-latest, rust: 1.100.0}
+          - {profile: image, os: ubuntu-latest, rust: 1.100.0}
+          - {profile: preimage, os: ubuntu-latest, rust: 1.100.0}
+          - {profile: ite, os: ubuntu-latest, rust: 1.100.0}
+    env:
+      PROFILE: ${{ matrix.profile }}
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+      COMPONENTS: ${{ matrix.components }}
+      SOURCE_REV: 7f69b5095ab64b1f23c9f131b6fb797dcd2a513e
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Install Rust
+        shell: bash
+        run: |
+          components=()
+          if [[ -n "$COMPONENTS" ]]; then components=(--component "$COMPONENTS"); fi
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal "${components[@]}"
+      - name: Install cargo-llvm-cov 0.9.1
+        if: matrix.profile == 'coverage'
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fsSL --retry 2 https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz -o cov.tar.gz
+          echo 'b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a  cov.tar.gz' | sha256sum -c -
+          mkdir cov-bin
+          tar xzf cov.tar.gz -C cov-bin
+          echo "$RUNNER_TEMP/cov-bin" >> "$GITHUB_PATH"
+      - name: Check candidate
+        run: python3 review-coverage/check.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: ${{ matrix.profile }}
+          path: report/
+          if-no-files-found: error
+          retention-days: 14
