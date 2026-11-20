@@ -1,7 +1,7 @@
 name: BDD advisory checks
 on:
   push:
-    branches: [lint/bdd-12777bb-d8jofppc]
+    branches: [lint/bdd-12777bb-d8jofppc, lint/bdd-12777bb-d8jofppc-validation]
 permissions:
   contents: read
 jobs:

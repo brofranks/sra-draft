@@ -78,7 +78,7 @@ elif kind == "regressions":
     shutil.copy2(checkout / "review-lints/oracle.rs.in", src / "tests/lint_oracle.rs")
     oracle = command("oracle", ["cargo", "test", "--release", "--locked", "--test", "lint_oracle", "--", "--nocapture"])
     for width in (4, 7, 9):
-        assert f"OBS finite oracle width={width} domain={1 << width}" in oracle.stdout.decode()
+        assert f"OBS finite oracle width={width} domain={1 << width}" in (oracle.stdout + oracle.stderr).decode()
     buffer_test = "bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full"
     push = "    fn push(&mut self, item: T) {"
     experiments = [
