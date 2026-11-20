@@ -305,32 +305,35 @@ fn an_unreferenced_right_boolean_operand_is_rejected() {
 
 // --- images and preimages ----
 
+#[cfg(debug_assertions)]
+#[track_caller]
+fn rejects_unreferenced(build: impl FnOnce() -> Function) {
+    let panic = catch_unwind(AssertUnwindSafe(build))
+        .expect_err("the operation accepted an unreferenced BDD node");
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"cannot use an unreferenced BDD node")
+    );
+}
+
 #[test]
 #[cfg(debug_assertions)]
-fn bit_map_shortcuts_check_both_input_roots() {
-    let c = col(&tiny(), BV4);
-    let released = set(&*c, [1]);
+fn bit_maps_check_both_input_roots() {
+    let c = col(&roomy(), BV4);
+    let released = c.set(&[1]);
+    let live = c.set(&[2]);
     c.dec_ref(released);
     let map = MapSpec::Bits {
         clear: vec![1].into(),
         flip: vec![0].into(),
     };
-    for (p, q) in [(Function::FALSE, released), (released, Function::FALSE)] {
-        for image in [false, true] {
-            let panic = catch_unwind(AssertUnwindSafe(|| {
-                if image {
-                    c.image(&map, p, q)
-                } else {
-                    c.preimage(&map, p, q)
-                }
-            }))
-            .expect_err("bit-map shortcuts must check root liveness");
-            assert_eq!(
-                panic.downcast_ref::<&str>(),
-                Some(&"cannot use an unreferenced BDD node")
-            );
+    for other in [Function::FALSE, live] {
+        for (p, q) in [(released, other), (other, released)] {
+            rejects_unreferenced(|| c.image(&map, p, q));
+            rejects_unreferenced(|| c.preimage(&map, p, q));
         }
     }
+    c.dec_ref(live);
 }
 
 #[test]
@@ -586,6 +589,19 @@ fn a_rust_map_on_a_bdd_is_rejected() {
             }
         }
     }
+}
+
+// --- conditionals ----
+
+#[test]
+#[cfg(debug_assertions)]
+fn conditionals_check_all_three_input_roots() {
+    let c = col(&roomy(), BV4);
+    let released = c.set(&[1]);
+    c.dec_ref(released);
+    rejects_unreferenced(|| c.ite(released, Function::TRUE, Function::TRUE));
+    rejects_unreferenced(|| c.ite(Function::FALSE, released, Function::TRUE));
+    rejects_unreferenced(|| c.ite(Function::TRUE, Function::FALSE, released));
 }
 
 // --- alignment ----

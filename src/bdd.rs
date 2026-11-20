@@ -1048,9 +1048,9 @@ impl Column for BddColumn {
         let mut pool = vec![1];
         let mut sum = Vec::new();
         let mut memo = Map::from_iter([(Function::FALSE, (0, 0)), (Function::TRUE, (0, 1))]);
-        let mut stack = vec![(p, 0)];
-        'nodes: while let Some((f, next)) = stack.last_mut() {
-            let f = *f;
+        let mut stack = Vec::new();
+        let (mut f, mut next) = (p, 0);
+        'nodes: loop {
             let node = state.node(f);
             assert!(!node.is_terminal(), "count requires a Boolean predicate");
             // Every edge intersects the reachable assignments: `intern_level` aliases
@@ -1060,10 +1060,11 @@ impl Column for BddColumn {
             // Edge masks count this level's assignments, so each shift spans only
             // the levels below it.
             let below = (span.last_level() - node.level()) * LEVEL_BITS;
-            while let Some(edge) = node.edges.get(*next) {
-                *next += 1;
+            while let Some(edge) = node.edges.get(next) {
+                next += 1;
                 if !memo.contains_key(&edge.child) {
-                    stack.push((edge.child, 0));
+                    stack.push((f, next));
+                    (f, next) = (edge.child, 0);
                     continue 'nodes;
                 }
             }
@@ -1088,12 +1089,10 @@ impl Column for BddColumn {
                 sum.pop();
             }
             // The root's digits are already in the result buffer.
-            if f == p {
-                break;
-            }
+            let Some(parent) = stack.pop() else { break };
             memo.insert(f, (pool.len(), sum.len()));
             pool.extend_from_slice(&sum);
-            stack.pop();
+            (f, next) = parent;
         }
         Count::from_digits(sum) << (self.sort().width() - bits(p))
     }

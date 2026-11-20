@@ -10,7 +10,7 @@ use std::panic::{self, AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use super::{BddStore, LevelBuffer, Memo, NeedGrowth};
+use super::{BddStore, Edge, LevelBuffer, Memo, NeedGrowth, Node};
 use crate::backend::{Alignment, Backend, BoolOp, Column, Function, MapSpec, Refinement, Values};
 use crate::scalar::ScalarSort;
 
@@ -80,6 +80,41 @@ fn level_buffer_preserves_its_initialized_prefix_when_full() {
     buffer.as_mut_slice()[63] = 999;
     expected[63] = 999;
     assert_eq!(buffer.as_slice(), expected);
+}
+
+// --- node interning ----
+
+#[test]
+fn colliding_nodes_are_distinguished_by_level_and_edges() {
+    let store = roomy();
+    let state = store.read();
+    let level = 1_u32;
+    let [edges, other] = [1_u64, 3].map(|mask| {
+        [
+            Edge {
+                mask,
+                child: Function::FALSE,
+            },
+            Edge {
+                mask: !mask,
+                child: Function::TRUE,
+            },
+        ]
+    });
+    // Give both candidates the target's hash so interning must compare them.
+    // The read guard keeps the table from being rebuilt during the test.
+    let hash = crate::util::dag::structural_hash((level, edges.as_slice()));
+    let insert = |data, candidate: &[Edge]| {
+        state
+            .intern(hash, |_, _| false, || Node { data }, candidate)
+            .unwrap()
+    };
+    let other_level = insert(0, &edges);
+    let other_edges = insert(level, &other);
+    let root = state.intern_node(level, &edges).unwrap();
+    assert_ne!(root, other_level, "merged different levels");
+    assert_ne!(root, other_edges, "merged different edges");
+    assert_eq!(state.intern_node(level, &edges), Ok(root));
 }
 
 #[test]
