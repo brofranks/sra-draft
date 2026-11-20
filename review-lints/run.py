@@ -16,7 +16,8 @@ src = Path(os.environ["RUNNER_TEMP"]) / "audit-source"
 src.mkdir()
 rev = "36987f938edde1fb652dacf5196f991a378d3547" if kind == "parent" else "HEAD"
 tracked = subprocess.check_output(["git", "ls-tree", "-r", "--name-only", "-z", rev]).decode().split("\0")
-paths = [p for p in tracked if p and not p.startswith("review-lints/") and p != ".github/workflows/bdd-lints.yml"]
+workflows = {".github/workflows/bdd-lints.yml", ".github/workflows/bdd-final-ci.yml"}
+paths = [p for p in tracked if p and not p.startswith("review-lints/") and p not in workflows]
 data = subprocess.check_output(["git", "archive", rev, "--", *paths])
 with tarfile.open(fileobj=io.BytesIO(data)) as archive:
     archive.extractall(src, filter="data")
@@ -73,6 +74,36 @@ elif kind == "focused-miri":
         result = command(name, ["cargo", "miri", "test", "--locked", *flags])
         if result.returncode == 0 and "test result: ok. 0 passed;" in result.stdout.decode(errors="replace"):
             raise AssertionError(f"The filter for {name} selected no tests")
+elif kind == "regressions":
+    shutil.copy2(checkout / "review-lints/oracle.rs.in", src / "tests/lint_oracle.rs")
+    oracle = command("oracle", ["cargo", "test", "--release", "--locked", "--test", "lint_oracle", "--", "--nocapture"])
+    for width in (4, 7, 9):
+        assert f"OBS finite oracle width={width} domain={1 << width}" in oracle.stdout.decode()
+    buffer_test = "bdd::tests::level_buffer_preserves_its_initialized_prefix_when_full"
+    push = "    fn push(&mut self, item: T) {"
+    experiments = [
+        ("lost-last-push", push, push + "\n        if self.len == LEVEL_VALUES - 1 { return; }", ["--lib"], buffer_test, "prefix after pushing 64"),
+        ("ignored-overflow", push, push + "\n        if self.len == LEVEL_VALUES { return; }", ["--lib"], buffer_test, "result.is_err()"),
+        ("alignment-prefix", "let class = (labels.len() - start) as u32;", "let class = labels.len() as u32;", ["--lib"],
+         "bdd::tests::alignment_numbers_reachable_pairs_in_discovery_order", "assertion"),
+        ("one-based-class", "let class = first.len() as u32;", "let class = first.len() as u32 + 1;", ["--test","bdd"],
+         "wide_keys_take_one_label_per_record", "at [0, 0]"),
+    ]
+    for name, before, after, target, test, reason in experiments:
+        fault = src.parent / ("fault-" + name)
+        shutil.copytree(src, fault)
+        path = fault / "src/bdd.rs"
+        data = path.read_text()
+        assert data.count(before) == 1
+        path.write_text(data.replace(before, after))
+        args = ["cargo","test","--locked",*target,test,"--","--exact"]
+        result = subprocess.run(args,cwd=fault,env=env | {"CARGO_TARGET_DIR":str(fault.parent/("target-"+name))},
+                                stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+        (out / (name+".out")).write_text(result.stdout)
+        detected = (result.returncode != 0 and test in result.stdout and reason in result.stdout
+                    and "test result: FAILED. 0 passed; 1 failed" in result.stdout)
+        log[name] = {"args":args, "fault_exit":result.returncode, "exit":0 if detected else 1}
+        print(name, "detected" if detected else result.stdout[-3000:], flush=True)
 else:
     raise ValueError(kind)
 

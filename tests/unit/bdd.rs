@@ -59,18 +59,17 @@ fn level_buffer_preserves_its_initialized_prefix_when_full() {
     assert!(buffer.as_slice().is_empty());
     assert!(buffer.as_mut_slice().is_empty());
 
-    let mut expected = [0_u64; 64];
-    for (i, value) in expected.iter_mut().enumerate() {
-        *value = i as u64 + 1;
-        buffer.push(*value);
-        assert_eq!(buffer.as_slice().len(), i + 1);
-        assert_eq!(buffer.as_slice()[i], *value);
-        assert!(buffer.as_slice().iter().copied().eq(1..=i as u64 + 1));
+    for value in 1..=64 {
+        buffer.push(value);
+        assert!(
+            buffer.as_slice().iter().copied().eq(1..=value),
+            "prefix after pushing {value}"
+        );
     }
     for value in buffer.as_mut_slice() {
         *value *= 3;
     }
-    expected.iter_mut().for_each(|value| *value *= 3);
+    let mut expected: [u64; 64] = std::array::from_fn(|i| 3 * (i as u64 + 1));
     assert_eq!(buffer.as_slice(), expected);
 
     let result = catch_unwind(AssertUnwindSafe(|| {

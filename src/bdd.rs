@@ -265,6 +265,7 @@ impl Grow for State {
 struct Memo {
     /// Boolean results keyed by operation and operands.
     apply: Map<(BoolOp, Function, Function), Function>,
+    /// Conditional results keyed by `(condition, yes, no)`.
     ite: Map<(Function, Function, Function), Function>,
     /// Both directions of complementation within this attempt.
     not: Map<Function, Function>,
@@ -684,8 +685,9 @@ impl State {
         let left_node = self.node(left);
         let right_node = self.node(right);
         let result = if left_node.is_terminal() && right_node.is_terminal() {
+            let class = (labels.len() - start) as u32;
             labels.push((left_node.terminal(), right_node.terminal()));
-            self.intern_terminal((labels.len() - start) as u32 - 1)?
+            self.intern_terminal(class)?
         } else {
             self.try_product(left, right, |l, r| {
                 self.try_align(memo, labels, start, l, r)
@@ -785,8 +787,9 @@ impl State {
         let mut class_of = Map::default();
         let result = self.try_map(&mut Map::default(), f, &mut |label| {
             *class_of.entry(label).or_insert_with(|| {
+                let class = first.len() as u32;
                 first.push(label);
-                first.len() as u32 - 1
+                class
             })
         })?;
         labels.extend_from_slice(&first);
@@ -1273,9 +1276,9 @@ impl Column for BddColumn {
                 "cannot use an unreferenced BDD node"
             );
             self.store.restart_cache(cache);
-            cache::align(cache, (left, right), labels, |labels, start| {
+            cache::align(cache, (left, right), labels, |out, start| {
                 scratch.memo.clear();
-                state.try_align(&mut scratch.memo, labels, start, left, right)
+                state.try_align(&mut scratch.memo, out, start, left, right)
             })
         })
     }

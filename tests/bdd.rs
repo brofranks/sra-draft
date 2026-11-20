@@ -214,7 +214,7 @@ fn counting_a_partition_is_rejected() {
     let store = roomy();
     let c = col(&store, BV4);
     let f = residues(&*c, 3);
-    let _ = c.count(f);
+    c.count(f);
 }
 
 // --- sets, cuts, and bit tests ----

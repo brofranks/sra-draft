@@ -16,6 +16,7 @@ jobs:
           - {profile: nightly-branches, os: ubuntu-latest, rust: nightly-2026-11-19, components: llvm-tools-preview}
           - {profile: nightly-unit, os: ubuntu-latest, rust: nightly-2026-11-19, components: llvm-tools-preview}
           - {profile: focused-miri, os: ubuntu-latest, rust: nightly-2026-11-19, components: 'miri,rust-src'}
+          - {profile: regressions, os: ubuntu-latest, rust: 1.100.0, components: rustfmt}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:

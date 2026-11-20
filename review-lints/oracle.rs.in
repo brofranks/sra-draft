@@ -1,0 +1,121 @@
+use std::ops::ControlFlow;
+use std::sync::Arc;
+use sra::backend::{Alignment, Backend, Column, Function, MapSpec, Refinement, Values};
+use sra::bdd::BddStore;
+use sra::scalar::ScalarSort;
+
+fn check(c: &dyn Column, p: Function, expected: &[bool]) {
+    let points: Vec<_> = (0..expected.len()).filter(|&i| expected[i]).map(|i| i as u64).collect();
+    assert_eq!(c.count(p), points.len() as u64);
+    let mut seen = Vec::new();
+    let mut cursor = c.members(p);
+    while let Some(x) = cursor.next() {
+        assert_eq!(x.len(), 1);
+        seen.push(x[0]);
+    }
+    assert_eq!(seen, points);
+    for (x, yes) in expected.iter().enumerate() {
+        assert_eq!(c.evaluate(p, &[x as u64]), u32::from(*yes));
+    }
+}
+
+fn first<T: PartialEq + Copy>(seen: &mut Vec<T>, value: T) -> u32 {
+    if let Some(i) = seen.iter().position(|&old| old == value) {
+        return i as u32;
+    }
+    seen.push(value);
+    (seen.len() - 1) as u32
+}
+
+#[test]
+fn maps_and_partitions_agree_with_concrete_sets() {
+    for width in [4, 7, 9] {
+        let n = 1_usize << width;
+        let mask = (n - 1) as u64;
+        let c = Arc::new(BddStore::with_capacity(8, 16, 1))
+            .column(ScalarSort::bit_vec(width)).unwrap();
+        let holds_p = |x: usize| (3 * x + (x >> 4) + 5) % 11 < 4;
+        let holds_q = |x: usize| ((x ^ (x >> 3)) + 4) % 7 < 4;
+        let set = |pred: &dyn Fn(usize) -> bool| {
+            c.set(&(0..n).filter(|&x| pred(x)).map(|x| x as u64).collect::<Vec<_>>())
+        };
+        let p = set(&holds_p);
+        let q = set(&holds_q);
+        for (clear, flip) in [(0, 0), (0x43, 0x95), (0xFF, 0x41), (0x84, 0x16)] {
+            let clear = clear & mask;
+            let flip = flip & mask;
+            let map = MapSpec::Bits { clear: vec![clear].into(), flip: vec![flip].into() };
+            let (mut image, mut preimage) = (vec![false; n], vec![false; n]);
+            for (x, pre) in preimage.iter_mut().enumerate() {
+                let mut y = 0;
+                for i in 0..width {
+                    let b = 1 << i;
+                    let input = (x as u64 & b != 0) && clear & b == 0;
+                    if input != (flip & b != 0) { y |= 1 << i; }
+                }
+                if holds_p(x) && holds_q(y) {
+                    image[y] = true;
+                    *pre = true;
+                }
+            }
+            let f = c.image(&map, p, q);
+            let g = c.preimage(&map, p, q);
+            check(&*c, f, &image);
+            check(&*c, g, &preimage);
+            c.dec_ref(f);
+            c.dec_ref(g);
+        }
+
+        let label = |x: usize| if x % 5 == 0 { 91 } else if (x ^ (x >> 4)) % 3 == 1 { 73 } else { 28 };
+        let mut keys = Vec::new();
+        let mut payloads = Vec::new();
+        let mut expected = Vec::new();
+        let classes: Vec<_> = (0..n).map(|x| {
+            let v = label(x);
+            if v != 28 { keys.push(x as u64); payloads.push(v); }
+            first(&mut expected, v)
+        }).collect();
+        let mut labels = vec![37];
+        let f = c.values(28, &keys, &payloads, &mut labels, &mut Values);
+        assert_eq!(labels[0], 37);
+        assert_eq!(&labels[1..], expected);
+        let a = set(&|x| label(x) == 91);
+        let b = set(&|x| label(x) == 73);
+        let mut cases_labels = Vec::new();
+        let rebuilt = c.cases(28, &[(b, 73), (a, 91)], &mut cases_labels);
+        assert_eq!(f, rebuilt);
+        assert_eq!(cases_labels, expected);
+        let mut expected_pairs = Vec::new();
+        let joint: Vec<_> = (0..n).map(|x| first(&mut expected_pairs, (classes[x], u32::from(holds_q(x))))).collect();
+        let mut pairs = vec![(17, 17)];
+        let mut cache = Alignment::default();
+        let h = c.align(f, q, &mut pairs, &mut cache);
+        assert_eq!(pairs[0], (17, 17));
+        assert_eq!(&pairs[1..], expected_pairs);
+        let coarsening: Vec<_> = (0..expected_pairs.len()).map(|i| (i % 2) as u32).collect();
+        let reduced = c.quotient(h, &coarsening, &mut cache);
+        for x in 0..n {
+            assert_eq!(c.evaluate(f, &[x as u64]), classes[x]);
+            assert_eq!(c.evaluate(h, &[x as u64]), joint[x]);
+            assert_eq!(c.evaluate(reduced, &[x as u64]), coarsening[joint[x] as usize]);
+        }
+        let mut visited = Vec::new();
+        let status = c.refine(f, p, &mut Refinement::default(), &mut |_| true,
+            &mut |class, build| {
+                assert!(!visited.contains(&class));
+                visited.push(class);
+                let cell = build();
+                let expected_cell: Vec<_> = (0..n).map(|x| holds_p(x) && classes[x] == class).collect();
+                assert!(expected_cell.iter().any(|&v| v));
+                check(&*c, cell, &expected_cell);
+                c.dec_ref(cell);
+                ControlFlow::Continue(())
+            });
+        assert_eq!(status, ControlFlow::Continue(()));
+        for (x, class) in classes.iter().enumerate() {
+            if holds_p(x) { assert!(visited.contains(class)); }
+        }
+        for root in [p, q, a, b, f, rebuilt, h, reduced] { c.dec_ref(root); }
+        eprintln!("OBS finite oracle width={width} domain={n}");
+    }
+}
