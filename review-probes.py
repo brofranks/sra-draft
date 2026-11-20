@@ -13,7 +13,8 @@ def cargo(test_target, name, expected=None):
         assert result.returncode == 0, name
     else:
         assert result.returncode != 0 and expected in result.stdout, name
-        assert f'test {name} ... FAILED' in result.stdout, name
+        assert any(line.startswith(f'test {name} ') and line.endswith(' ... FAILED')
+                   for line in result.stdout.splitlines()), name
 
 probes = ['--test', 'review_sparse']
 for name in ['empty_refine_rejects_released_partition', 'partial_map_rejects_released_filter']:

@@ -44,7 +44,7 @@ fn public_scratch_reuse_after_discarding_lookup_table() {
     let c = col(4);
     let f = c.set(&[1]);
     let mut scratch = Refinement::default();
-    let run = |s| {
+    let run = |s: &mut Refinement| {
         c.refine(
             f,
             Function::TRUE,
