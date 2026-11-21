@@ -7,9 +7,9 @@
 //! safety violations in observed executions. Soundness requires reasoning about
 //! all possible executions.
 //!
-//! Run under Miri with
-//! `cargo +nightly miri test --locked --test soundness`. CI also enables strict
-//! provenance, symbolic alignment checks, both borrow models, and a seed sweep.
+//! Run under Miri with `cargo +nightly miri test --locked --test soundness`.
+//! CI also enables strict provenance, symbolic alignment checks, both borrow
+//! models, and a seed sweep.
 
 use std::array;
 use std::cell::Cell;

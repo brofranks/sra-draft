@@ -147,9 +147,15 @@ fn cached_batches_remain_owned_when_arena_cache_cells_collide() {
     // One more arena than cache cells guarantees a collision even when other tests
     // allocate identities concurrently. Only the input selection uses the cache
     // index; assertions check each arena's independent nodes and edges.
-    let arenas: Vec<Arena<Id>> =
-        Vec::from_fn(REGION_CELLS + 1, |_| Dag::with_capacity(4096, 4096, []));
+    let mut arenas: Vec<Arena<Id>> =
+        Vec::from_fn(REGION_CELLS + 1, |_| Dag::with_capacity(0, 0, []));
     let (i, j) = colliding(&arenas);
+    // Only the two publishers need space for two-slot node and edge batches.
+    for idx in [i, j] {
+        let dag = &mut arenas[idx];
+        dag.nodes.resize_with(4096, super::NodeSlot::new);
+        dag.edges.resize_with(4096, super::Slot::new);
+    }
     let (a, b) = (&arenas[i], &arenas[j]);
     let mut ids = Vec::new();
     for value in 0..4 {
