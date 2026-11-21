@@ -7,3 +7,4 @@ pub mod backend;
 pub mod bdd;
 mod cache;
 pub mod scalar;
+pub mod sparse;

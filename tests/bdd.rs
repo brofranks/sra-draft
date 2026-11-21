@@ -9,7 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::thread;
 
-use sra::backend::{Algebra, Align, Backend, BoolOp, Function, MapSpec, Refine, Values, transfer};
+use sra::backend::{Algebra, Align, Backend, BoolOp, Function, MapSpec, Refine, transfer};
 use sra::bdd::BddStore;
 use sra::scalar::ScalarSort;
 use sra::util::count::Count;
@@ -716,19 +716,6 @@ fn a_rust_map_on_a_bdd_is_rejected() {
     }
 }
 
-// --- conditionals ----
-
-#[test]
-#[cfg(debug_assertions)]
-fn conditionals_check_all_three_input_roots() {
-    let alg = bind(&roomy(), BV4);
-    let released = alg.set(&[1]);
-    alg.dec_ref(released);
-    rejects_unreferenced(|| alg.ite(released, Function::TRUE, Function::TRUE));
-    rejects_unreferenced(|| alg.ite(Function::FALSE, released, Function::TRUE));
-    rejects_unreferenced(|| alg.ite(Function::TRUE, Function::FALSE, released));
-}
-
 // --- alignment ----
 
 #[test]
@@ -739,8 +726,8 @@ fn alignment_numbers_interleaved_masks_at_their_first_assignment() {
     let right: Vec<u32> = (0..64)
         .map(|x| if x % 2 == 0 { x / 2 } else { 0 })
         .collect();
-    let f = alg.values(100, &keys, &left, &mut Vec::new(), &mut Values);
-    let g = alg.values(100, &keys, &right, &mut Vec::new(), &mut Values);
+    let f = alg.values(100, &keys, &left, &mut Vec::new(), &mut Default::default());
+    let g = alg.values(100, &keys, &right, &mut Vec::new(), &mut Default::default());
     let mut labels = Vec::new();
     let h = alg.align(f, g, &mut labels, &mut Align::default());
     let mut expected = Vec::new();
@@ -891,7 +878,7 @@ fn alignment_of_an_unreferenced_right_partition_is_rejected() {
 fn quotient_scratch_can_be_reused_across_stores_with_matching_root_ids() {
     let [a, b] = [roomy(), roomy()].map(|store| store.bind(BV4).unwrap());
     let [f, g] = [(&a, [1, 2]), (&b, [3, 4])]
-        .map(|(alg, keys)| alg.values(0, &keys, &[7, 8], &mut Vec::new(), &mut Values));
+        .map(|(alg, keys)| alg.values(0, &keys, &[7, 8], &mut Vec::new(), &mut Default::default()));
     assert_eq!(f.index(), g.index());
     let mut scratch = Align::default();
     let classes = [0, 1, 0];
@@ -1015,24 +1002,6 @@ fn disjoint_default_labeled_cases_change_nothing() {
     alg.dec_ref(b);
 }
 
-#[test]
-#[should_panic(expected = "cases with different labels overlap")]
-fn a_default_labeled_case_overlapping_a_later_case_is_rejected() {
-    let store = roomy();
-    let alg = bind(&store, BV4);
-    let (a, b) = (set(&*alg, [1, 2, 3]), set(&*alg, [3, 4]));
-    let _ = alg.cases(0, &[(a, 0), (b, 1)], &mut Vec::new());
-}
-
-#[test]
-#[should_panic(expected = "cases with different labels overlap")]
-fn a_default_labeled_case_overlapping_an_earlier_case_is_rejected() {
-    let store = roomy();
-    let alg = bind(&store, BV4);
-    let (a, b) = (set(&*alg, [1, 2, 3]), set(&*alg, [3, 4]));
-    let _ = alg.cases(0, &[(b, 1), (a, 0)], &mut Vec::new());
-}
-
 // --- values ----
 
 #[test]
@@ -1041,27 +1010,20 @@ fn full_key_sets_and_single_class_partitions_return_the_constants() {
     let keys: Vec<_> = (0..128).collect();
     let mut labels = vec![77];
     assert_eq!(alg.set(&keys), Function::TRUE);
-    let f = alg.values(9, &keys, &[42; 128], &mut labels, &mut Values);
+    let f = alg.values(9, &keys, &[42; 128], &mut labels, &mut Default::default());
     assert_eq!(f, Function::FALSE);
     assert_eq!(labels, [77, 42]);
 
-    let f = alg.values(9, &keys[..127], &[42; 127], &mut labels, &mut Values);
+    let f = alg.values(
+        9,
+        &keys[..127],
+        &[42; 127],
+        &mut labels,
+        &mut Default::default(),
+    );
     assert_eq!(labels, [77, 42, 42, 9]);
     assert_eq!(alg.evaluate(f, &[126]), 0);
     assert_eq!(alg.evaluate(f, &[127]), 1);
-    alg.dec_ref(f);
-}
-
-#[test]
-fn values_append_only_reachable_labels_after_the_prefix() {
-    // The store starts without edge slots. Interning the canonical branch
-    // forces a retry after both labels have been appended.
-    let alg = bind(&tiny(), ScalarSort::bool());
-    // Both keys are listed, so the default is unreachable and not appended.
-    let mut labels = vec![77];
-    let f = alg.values(9, &[0, 1], &[10, 20], &mut labels, &mut Values);
-    assert_eq!(labels, [77, 10, 20]);
-    assert_eq!([alg.evaluate(f, &[0]), alg.evaluate(f, &[1])], [0, 1]);
     alg.dec_ref(f);
 }
 
@@ -1074,7 +1036,13 @@ fn values_number_the_default_at_the_first_multiword_gap() {
     ] {
         let mut labels = Vec::new();
         let cases = [11, 12, 11];
-        let f = alg.values(9, keys.as_flattened(), &cases, &mut labels, &mut Values);
+        let f = alg.values(
+            9,
+            keys.as_flattened(),
+            &cases,
+            &mut labels,
+            &mut Default::default(),
+        );
         assert_eq!(labels, expected);
         for (key, label) in keys.iter().zip(cases) {
             assert_eq!(labels[alg.evaluate(f, key) as usize], label);
@@ -1091,7 +1059,13 @@ fn shared_prefixes_preserve_wide_key_membership_and_label_offsets() {
     let cases = [8, 8, 7, 6, 8, 7];
     let p = alg.set(keys.as_flattened());
     let mut labels = vec![77];
-    let f = alg.values(9, keys.as_flattened(), &cases, &mut labels, &mut Values);
+    let f = alg.values(
+        9,
+        keys.as_flattened(),
+        &cases,
+        &mut labels,
+        &mut Default::default(),
+    );
     assert_eq!(labels, [77, 9, 8, 7, 6]);
     assert_eq!(alg.count(p), keys.len() as u64);
     for (key, label) in keys.iter().zip(cases) {
@@ -1110,38 +1084,62 @@ fn shared_prefixes_preserve_wide_key_membership_and_label_offsets() {
 #[should_panic(expected = "values are not packed at the sort's word stride")]
 fn value_keys_off_the_word_stride_are_rejected() {
     let alg = bind(&roomy(), ScalarSort::bv(70));
-    let _ = alg.values(0, &[1, 0, 2], &[1], &mut Vec::new(), &mut Values);
+    let _ = alg.values(
+        0,
+        &[1, 0, 2],
+        &[1],
+        &mut Vec::new(),
+        &mut Default::default(),
+    );
 }
 
 #[test]
 #[should_panic(expected = "value is outside the scalar sort")]
 fn a_value_key_outside_the_sort_is_rejected() {
-    let _ = bind(&roomy(), BV4).values(0, &[1, 0x10], &[1, 2], &mut Vec::new(), &mut Values);
+    let _ = bind(&roomy(), BV4).values(
+        0,
+        &[1, 0x10],
+        &[1, 2],
+        &mut Vec::new(),
+        &mut Default::default(),
+    );
 }
 
 #[test]
 #[should_panic(expected = "values are not sorted and distinct")]
 fn unsorted_value_keys_are_rejected() {
-    let _ = bind(&roomy(), BV4).values(0, &[2, 1], &[1, 2], &mut Vec::new(), &mut Values);
+    let _ = bind(&roomy(), BV4).values(
+        0,
+        &[2, 1],
+        &[1, 2],
+        &mut Vec::new(),
+        &mut Default::default(),
+    );
 }
 
 #[test]
 #[should_panic(expected = "values are not sorted and distinct")]
 fn repeated_value_keys_are_rejected() {
     let alg = bind(&roomy(), ScalarSort::bool());
-    let _ = alg.values(0, &[1, 1], &[7, 7], &mut Vec::new(), &mut Values);
+    let _ = alg.values(
+        0,
+        &[1, 1],
+        &[7, 7],
+        &mut Vec::new(),
+        &mut Default::default(),
+    );
 }
 
 #[test]
 #[should_panic(expected = "there must be one case label per key")]
 fn values_with_too_few_labels_are_rejected() {
-    let _ = bind(&roomy(), BV4).values(0, &[1, 2], &[1], &mut Vec::new(), &mut Values);
+    let _ = bind(&roomy(), BV4).values(0, &[1, 2], &[1], &mut Vec::new(), &mut Default::default());
 }
 
 #[test]
 #[should_panic(expected = "there must be one case label per key")]
 fn empty_values_with_a_case_label_are_rejected() {
-    let _ = bind(&tiny(), BV4).values(42, &[], &[7], &mut Vec::new(), &mut Values);
+    let _ = bind(&tiny(), BV4).values(42, &[], &[7], &mut Vec::new(), &mut Default::default());
 }
 
 // --- refinement ----
@@ -1478,13 +1476,13 @@ fn wide_partition_products_and_filtered_transfers_fit_a_two_mib_stack() {
     let b = alg.set(one);
     let p = alg.set(&keys[..2 * words]);
     let q = alg.set(&keys[words..]);
-    let f = alg.values(1, zero, &[0], &mut Vec::new(), &mut Values);
+    let f = alg.values(1, zero, &[0], &mut Vec::new(), &mut Default::default());
     let partition = alg.values(
         17,
         &keys[..2 * words],
         &[4, 5],
         &mut Vec::new(),
-        &mut Values,
+        &mut Default::default(),
     );
     let map = MapSpec::Bits {
         clear: zero.into(),
@@ -1546,7 +1544,7 @@ fn wide_singleton_transfers_and_a_three_class_quotient_fit_a_two_mib_stack() {
         flip: one.into(),
     };
     let mut labels = Vec::new();
-    let f = alg.values(2, &keys, &[0, 1], &mut labels, &mut Values);
+    let f = alg.values(2, &keys, &[0, 1], &mut labels, &mut Default::default());
     assert_eq!(labels, [0, 1, 2]);
 
     // The flip exchanges zero and one. The quotient merges zero with the

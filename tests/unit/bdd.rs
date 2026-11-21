@@ -11,7 +11,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 
 use super::{BddStore, Edge, LevelBuffer, Memo, NeedGrowth, Node};
-use crate::backend::{Algebra, Align, Backend, BoolOp, Function, MapSpec, Refine, Values};
+use crate::backend::{Algebra, Align, Backend, BoolOp, Function, MapSpec, Refine};
 use crate::scalar::ScalarSort;
 
 #[path = "../support/bdd.rs"]
@@ -689,7 +689,7 @@ fn empty_partitions_append_only_the_default_without_maintenance() {
     let mut labels = vec![7];
     assert_eq!(alg.cases(42, &[], &mut labels), Function::FALSE);
     assert_eq!(
-        alg.values(42, &[], &[], &mut labels, &mut Values),
+        alg.values(42, &[], &[], &mut labels, &mut Default::default()),
         Function::FALSE
     );
     assert_eq!(labels, [7, 42, 42]);
@@ -734,7 +734,7 @@ fn values_restore_the_label_prefix_when_construction_unwinds() {
     let alg = bind(&store, ScalarSort::bool());
     let mut labels = vec![77];
     let panic = catch_unwind(AssertUnwindSafe(|| {
-        alg.values(9, &[0, 1], &[10, 20], &mut labels, &mut Values)
+        alg.values(9, &[0, 1], &[10, 20], &mut labels, &mut Default::default())
     }))
     .unwrap_err();
     assert_eq!(
@@ -750,7 +750,7 @@ fn values_number_classes_in_order_of_first_appearance() {
     let (width, len) = if cfg!(miri) { (8, 18) } else { (12, 300) };
     let alg = bind(&store, ScalarSort::bv(width));
     let mut labels = Vec::new();
-    let mut scratch = Values;
+    let mut scratch = Default::default();
     // The raw labels lie above the class numbers. Zero takes the default
     // label, so its class gets the pinned zero terminal.
     let keys: Vec<u64> = (1..len).map(|v| v * 13).collect();
@@ -775,7 +775,13 @@ fn full_key_coverage_interns_only_the_canonical_branch() {
     let store = Arc::new(BddStore::with_capacity(3, 2, 1));
     let alg = bind(&store, ScalarSort::bool());
     let mut labels = vec![8];
-    let f = alg.values(7, &[0, 1], &[42, u32::MAX], &mut labels, &mut Values);
+    let f = alg.values(
+        7,
+        &[0, 1],
+        &[42, u32::MAX],
+        &mut labels,
+        &mut Default::default(),
+    );
     assert_eq!(labels, [8, 42, u32::MAX]);
     assert_eq!([alg.evaluate(f, &[0]), alg.evaluate(f, &[1])], [0, 1]);
     assert_eq!(epoch(&store), 0);

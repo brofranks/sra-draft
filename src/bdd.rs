@@ -1453,20 +1453,9 @@ impl Algebra for BddAlgebra {
     /// Substituting `classes[i]` for each input class `i` preserves canonical
     /// numbering, since both partitions use order of first appearance.
     fn quotient(&self, f: Function, classes: &[u32], scratch: &mut Align) -> Function {
-        debug_assert!(
-            classes
-                .iter()
-                .try_fold(0, |next, &i| (i <= next).then(|| next.max(i + 1)))
-                .is_some(),
-            "quotient classes must be numbered in first-appearance order"
-        );
-        debug_assert!(
-            classes
-                .iter()
-                .enumerate()
-                .any(|(i, &class)| class as usize != i),
-            "quotient must merge at least two classes"
-        );
+        if cfg!(debug_assertions) {
+            crate::backend::check_quotient(classes);
+        }
         let cache = &mut scratch.cache;
         let key = (f, dag::structural_hash(classes));
         self.store.owned(|state| {
@@ -1474,7 +1463,22 @@ impl Algebra for BddAlgebra {
             self.store.restart_cache(cache);
             cache::quotient(cache, key, classes, || {
                 scratch.coarse.clear();
-                state.try_map(&mut scratch.coarse, f, &mut |i| classes[i as usize])
+                #[cfg(debug_assertions)]
+                let mut max = 0;
+                let q = state.try_map(&mut scratch.coarse, f, &mut |class| {
+                    #[cfg(debug_assertions)]
+                    {
+                        max = max.max(class);
+                    }
+                    classes[class as usize]
+                })?;
+                #[cfg(debug_assertions)]
+                assert_eq!(
+                    classes.len(),
+                    max as usize + 1,
+                    "there must be one quotient class per input class"
+                );
+                Ok(q)
             })
         })
     }
@@ -1604,7 +1608,9 @@ impl Algebra for BddAlgebra {
             );
             return ControlFlow::Continue(());
         }
-        let Refine { stack, seen, memo } = scratch;
+        let Refine {
+            stack, seen, memo, ..
+        } = scratch;
         stack.clear();
         stack.push((f, p));
         seen.clear();

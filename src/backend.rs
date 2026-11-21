@@ -236,12 +236,110 @@ impl MapSpec {
     }
 }
 
+/// Group lookup sentinels for classes not yet reached and classes declined.
+const UNREACHED: u32 = u32::MAX;
+const DECLINED: u32 = u32::MAX - 1;
+
+/// Reusable transition buffers for a sparse refinement.
+#[derive(Debug, Default)]
+pub struct Groups {
+    /// Class, initial payload, and encoded transitions for each selected class.
+    /// Groups beyond the selected prefix keep their buffers for the next call.
+    groups: Vec<(u32, u32, Vec<u64>)>,
+    /// Length of the selected prefix.
+    len: usize,
+    /// The group index for each class, or a sentinel for unreached and declined
+    /// classes. Dense class numbering makes this a direct lookup.
+    classes: Vec<u32>,
+    /// Declined classes whose lookup entries need clearing on restart.
+    declined: Vec<u32>,
+}
+
+impl Groups {
+    /// The number of distinct classes reached, including declined classes.
+    #[inline(always)]
+    pub fn reached(&self) -> usize {
+        self.len + self.declined.len()
+    }
+
+    /// The selected classes and their initial payloads and transition buffers.
+    #[inline(always)]
+    pub fn selected(&mut self) -> impl Iterator<Item = (u32, u32, &mut Vec<u64>)> {
+        self.groups[..self.len]
+            .iter_mut()
+            .map(|(class, initial, transitions)| (*class, *initial, transitions))
+    }
+
+    /// Returns the selected class's transition buffer.
+    ///
+    /// Asks `select` on the first reach of a class after restart and sets the
+    /// accepted group's initial payload. Declined classes yield `None`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the class lookup exceeds the platform's vector capacity or
+    /// selecting the class would exceed `u32::MAX - 1` selected classes.
+    #[inline(always)]
+    pub fn group(
+        &mut self,
+        class: u32,
+        initial: u32,
+        select: &mut dyn FnMut(u32) -> bool,
+    ) -> Option<&mut Vec<u64>> {
+        let idx = class as usize;
+        if self.classes.len() <= idx {
+            let len = idx
+                .checked_add(1)
+                .expect("class lookup length exceeds usize");
+            self.classes.resize(len, UNREACHED);
+        }
+        let i = self.classes[idx];
+        if i == DECLINED {
+            return None;
+        }
+        if i != UNREACHED {
+            return Some(&mut self.groups[i as usize].2);
+        }
+        if !select(class) {
+            self.classes[idx] = DECLINED;
+            self.declined.push(class);
+            return None;
+        }
+        let i = self.len;
+        assert!(i < DECLINED as usize, "selected group index overflow");
+        self.classes[idx] = i as u32;
+        if i == self.groups.len() {
+            self.groups.push((class, initial, Vec::new()));
+        } else {
+            let group = &mut self.groups[i];
+            (group.0, group.1) = (class, initial);
+            group.2.clear();
+        }
+        self.len += 1;
+        Some(&mut self.groups[i].2)
+    }
+
+    /// Begins grouping, retaining the buffers from the previous call.
+    #[inline(always)]
+    pub fn restart(&mut self) {
+        for &(class, _, _) in &self.groups[..self.len] {
+            self.classes[class as usize] = UNREACHED;
+        }
+        for class in self.declined.drain(..) {
+            self.classes[class as usize] = UNREACHED;
+        }
+        self.len = 0;
+    }
+}
+
 /// Caller-owned working memory for [`Algebra::refine`].
 ///
 /// A delivered cell may start a nested refinement, so callers keep one `Refine`
 /// per nesting level and reuse it across sibling calls.
 #[derive(Debug, Default)]
 pub struct Refine {
+    /// Buffered transitions for selected classes.
+    pub groups: Groups,
     /// Node pairs of the product still to discover.
     pub stack: Vec<(Function, Function)>,
     /// Node pairs of the product discovered already.
@@ -252,18 +350,51 @@ pub struct Refine {
 
 /// Caller-owned working memory for [`Algebra::values`].
 #[derive(Debug, Default)]
-pub struct Values;
+pub struct Values {
+    /// The point assignment as encoded transition words, relabeled in place.
+    pub transitions: Vec<u64>,
+    /// One domain value, for stepping a key to its successor.
+    pub next: Vec<u64>,
+    /// The class carrying each label reached so far.
+    pub classes: Map<u32, u32>,
+}
 
 /// Caller-owned working memory for [`Algebra::align`] and
 /// [`Algebra::quotient`].
 #[derive(Debug, Default)]
 pub struct Align {
+    /// The result map as encoded transition words.
+    pub transitions: Vec<u64>,
+    /// The result class for each reached pair of input classes.
+    pub pairs: Map<(u32, u32), u32>,
     /// Aligned node pairs already interned.
     pub memo: Map<(Function, Function), Function>,
     /// Coarsened nodes already interned.
     pub coarse: Map<Function, Function>,
     /// Whole-call results kept across calls, as [`Cache`] describes.
     pub cache: Cache,
+}
+
+/// Checks the result class numbering and count of a quotient map.
+///
+/// # Panics
+///
+/// Panics if result classes are numbered out of first-appearance order or
+/// the map leaves fewer than two classes or merges no input classes.
+pub fn check_quotient(classes: &[u32]) {
+    let mut n = 0;
+    for &class in classes {
+        let i = class as usize;
+        assert!(
+            i <= n,
+            "quotient classes must be numbered in first-appearance order"
+        );
+        n += usize::from(i == n);
+    }
+    assert!(
+        (2..classes.len()).contains(&n),
+        "quotient must merge input classes and leave at least two result classes"
+    );
 }
 
 /// A cursor over a predicate's members, as returned by [`Algebra::members`].
@@ -420,6 +551,8 @@ pub trait Algebra: Send + Sync {
     ///
     /// Panics if [`MapSpec::check_sort`] rejects `map`, or the backend rejects
     /// its kind.
+    /// Panics if an invoked [`MapSpec::Rust`] callback returns `true` with an
+    /// output outside the bound sort.
     #[must_use = "release the returned root with `Algebra::dec_ref`"]
     fn image(&self, map: &MapSpec, p: Function, q: Function) -> Function;
 
@@ -466,7 +599,8 @@ pub trait Algebra: Send + Sync {
     ///
     /// # Panics
     ///
-    /// Panics if overlapping predicates carry different labels.
+    /// Panics if overlapping predicates carry different labels, leaving
+    /// `labels` unchanged.
     #[must_use = "release the returned root with `Algebra::dec_ref`"]
     fn cases(&self, default: u32, cases: &[(Function, u32)], labels: &mut Vec<u32>) -> Function;
 
@@ -525,3 +659,7 @@ pub trait Algebra: Send + Sync {
     /// Other operations may run between advances.
     fn members(&self, p: Function) -> Box<dyn Cursor + '_>;
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/backend.rs"]
+mod tests;
