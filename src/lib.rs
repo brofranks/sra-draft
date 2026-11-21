@@ -6,5 +6,6 @@ pub mod util;
 pub mod backend;
 pub mod bdd;
 mod cache;
+pub mod context;
 pub mod scalar;
 pub mod sparse;
