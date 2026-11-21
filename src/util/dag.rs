@@ -713,8 +713,8 @@ const MIN_FREE_PERCENT: u64 = 75;
 /// unique-table rebuild phase.
 const REHASH_CHUNK: usize = 4096;
 
-/// The results of `part` over consecutive chunks of `items`, each at least `min`
-/// long except a shorter tail, in item order.
+/// The results of `part` over consecutive chunks of `items`,
+/// each at least `min` long except a shorter tail, in item order.
 ///
 /// Up to `threads` threads run the chunks, counting the caller, which runs the
 /// first.
@@ -1416,10 +1416,9 @@ impl<I: Idx, N, E: Copy> Dag<I, N, E> {
     /// in `exhausted` increases every exhausted resource's capacity.
     ///
     /// A caller owning the DAG builds `exhausted` from a failed operation's
-    /// [`NeedGrowth`] with [`Exhausted::from`], and adds [`Exhausted::forced`]
-    /// when the same operation fails again, so a retry loop terminates. The
-    /// [`Shared`] wrapper instead accumulates every failure since the last
-    /// maintenance.
+    /// [`NeedGrowth`] with [`Exhausted::from`], and adds [`Exhausted::forced`] when
+    /// the same operation fails again, so a retry loop terminates. The [`Shared`]
+    /// wrapper instead accumulates every failure since the last maintenance.
     ///
     /// If a callback or node destructor panics, the DAG remains memory-safe,
     /// but its contents are unspecified. Callers should discard it.
