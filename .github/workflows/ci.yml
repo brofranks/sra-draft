@@ -52,7 +52,11 @@ jobs:
       matrix:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
         borrows: [stacked, tree]
-    name: miri (${{ matrix.target }}, ${{ matrix.borrows }} borrows)
+        shard:
+          - { id: library, args: --lib }
+          - { id: integration-ab, args: "--test '[ab]*'" }
+          - { id: integration-rest, args: "--test '[!ab]*'" }
+    name: miri (${{ matrix.target }}, ${{ matrix.borrows }} borrows, ${{ matrix.shard.id }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -64,9 +68,12 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install $RUSTUP_TOOLCHAIN --profile minimal --component miri,rust-src
       # Tests too slow for Miri opt out with `cfg_attr(miri, ignore)`.
-      - run: cargo miri test --locked --target ${{ matrix.target }}
+      - run: cargo miri test --locked --target ${{ matrix.target }} ${{ matrix.shard.args }}
+      # Cargo cannot select doctests together with other targets.
+      - if: matrix.shard.id == 'library'
+        run: cargo miri test --locked --target ${{ matrix.target }} --doc
       # Miri checks one thread schedule per seed. Sweep seeds over soundness tests.
-      - if: matrix.target == 'x86_64-unknown-linux-gnu'
+      - if: matrix.target == 'x86_64-unknown-linux-gnu' && matrix.shard.id == 'integration-rest'
         run: >-
           MIRIFLAGS="$MIRIFLAGS -Zmiri-many-seeds=1..8"
           cargo miri test --locked --test soundness --target ${{ matrix.target }}

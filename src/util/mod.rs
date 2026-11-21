@@ -1,7 +1,8 @@
-//! Generic storage primitives beneath every backend.
+//! Generic storage primitives and exact counts beneath every backend.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+pub mod count;
 pub mod dag;
 
 /// Allocates a process-unique identity, reserving zero and `u64::MAX`.
