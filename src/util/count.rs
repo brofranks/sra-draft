@@ -67,6 +67,30 @@ impl Count {
         digits.truncate(i + 1);
         Self(digits)
     }
+
+    /// The product of this count and two raised to `bits`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the shifted count exceeds the addressable digit capacity.
+    pub fn shift(self, bits: u64) -> Self {
+        if bits == 0 || self.0.is_empty() {
+            return self;
+        }
+        let words = usize::try_from(bits / u64::from(u64::BITS))
+            .expect("shifted count exceeds digit capacity");
+        let shift = (bits % u64::from(u64::BITS)) as u32;
+        // One digit beyond the whole-word shift holds the shifted-out bits.
+        let len = self
+            .0
+            .len()
+            .checked_add(words)
+            .and_then(|n| n.checked_add(1))
+            .expect("shifted count exceeds digit capacity");
+        let mut out = vec![0; len];
+        add_scaled(&mut out[words..], &self.0, 1, shift);
+        Self::from_digits(out)
+    }
 }
 
 impl From<u64> for Count {
@@ -147,13 +171,7 @@ impl Shl<u32> for Count {
     type Output = Self;
 
     fn shl(self, n: u32) -> Self {
-        if n == 0 || self.0.is_empty() {
-            return self;
-        }
-        // One digit beyond the whole-word shift holds the shifted-out bits.
-        let mut out = vec![0; self.0.len() + (n / u64::BITS) as usize + 1];
-        add_scaled(&mut out, &self.0, 1, n);
-        Self::from_digits(out)
+        self.shift(u64::from(n))
     }
 }
 

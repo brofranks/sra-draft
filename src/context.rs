@@ -7,14 +7,17 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::ast::{FuncDecl, Sorts};
 use crate::backend::{Algebra, Backend, BoolOp, Function};
 use crate::bdd::BddStore;
+use crate::index_store::Store;
 use crate::scalar::ScalarSort;
 use crate::sparse::SparseStore;
 use crate::util::count::Count;
+
+pub mod index;
 
 /// The ID of a backend binding to one scalar sort within a context.
 ///
@@ -29,10 +32,12 @@ pub struct AlgebraId {
 struct ContextData {
     sorts: Sorts,
     fields: HashMap<FuncDecl, AlgebraId>,
+    // Indexes release their partitions before algebras and backends drop.
+    indexes: Mutex<Vec<Arc<Store>>>,
     // Each entry records the backend index alongside its bound algebra.
     // Fields drop in declaration order, so the registry retains its
     // backends while the algebras drop.
-    algebras: Vec<(usize, Box<dyn Algebra>)>,
+    algebras: Vec<(usize, Arc<dyn Algebra>)>,
     backends: Vec<(Box<str>, Arc<dyn Backend>)>,
 }
 
@@ -175,8 +180,8 @@ impl Drop for Predicate {
     }
 }
 
-/// A shared owner of logical sorts, backends, bound algebras, and field
-/// bindings.
+/// A shared owner of logical sorts, backends, bound algebras, field bindings,
+/// and native indexes.
 ///
 /// Clones address the same storage and compare equal. Backend registration
 /// and new bindings require exclusive access so algebra resolution stays a
@@ -194,6 +199,7 @@ impl Context {
             data: Arc::new(ContextData {
                 sorts: Sorts::default(),
                 fields: HashMap::new(),
+                indexes: Mutex::default(),
                 algebras: Vec::new(),
                 backends: Vec::new(),
             }),
@@ -269,7 +275,7 @@ impl Context {
             .expect("backend must support the requested sort");
         assert!(alg.sort() == sort, "backend bound a different scalar sort");
         let index = data.algebras.len();
-        data.algebras.push((backend, alg));
+        data.algebras.push((backend, Arc::from(alg)));
         AlgebraId {
             context: data.sorts.id(),
             index,

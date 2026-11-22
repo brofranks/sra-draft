@@ -116,24 +116,33 @@ impl BoolOp {
     /// these identities do not decide it.
     #[inline(always)]
     pub fn simplify(self, left: Function, right: Function) -> Option<Function> {
+        self.simplify_roots(left, right, Function::FALSE, Function::TRUE)
+    }
+
+    /// The same Boolean identities for a root type with its own constants.
+    ///
+    /// Both inputs share a root namespace. A simplified result borrows its
+    /// reference from an input or is one of the supplied constants.
+    #[inline(always)]
+    pub fn simplify_roots<I: Copy + Eq>(self, left: I, right: I, f: I, t: I) -> Option<I> {
         if left == right {
             return Some(match self {
                 Self::And | Self::Or => left,
-                Self::Xor | Self::AndNot => Function::FALSE,
+                Self::Xor | Self::AndNot => f,
             });
         }
 
         match self {
-            Self::And if left.is_f() || right.is_f() => Some(Function::FALSE),
-            Self::And if left.is_t() => Some(right),
-            Self::And if right.is_t() => Some(left),
-            Self::Or if left.is_f() => Some(right),
-            Self::Or if right.is_f() => Some(left),
-            Self::Or if left.is_t() || right.is_t() => Some(Function::TRUE),
-            Self::Xor if left.is_f() => Some(right),
-            Self::Xor if right.is_f() => Some(left),
-            Self::AndNot if left.is_f() || right.is_t() => Some(Function::FALSE),
-            Self::AndNot if right.is_f() => Some(left),
+            Self::And if left == f || right == f => Some(f),
+            Self::And if left == t => Some(right),
+            Self::And if right == t => Some(left),
+            Self::Or if left == f => Some(right),
+            Self::Or if right == f => Some(left),
+            Self::Or if left == t || right == t => Some(t),
+            Self::Xor if left == f => Some(right),
+            Self::Xor if right == f => Some(left),
+            Self::AndNot if left == f || right == t => Some(f),
+            Self::AndNot if right == f => Some(left),
             _ => None,
         }
     }
@@ -488,6 +497,13 @@ pub trait Algebra: Send + Sync {
     /// Constants are unaffected. A token is reused only after all owners
     /// release it.
     fn dec_ref(&self, f: Function);
+
+    /// Releases one owned external reference per root in the slice.
+    fn dec_refs(&self, roots: &[Function]) {
+        for &f in roots {
+            self.dec_ref(f);
+        }
+    }
 
     /// The value of `f` at `value`: a predicate's zero/one or a partition's
     /// class number.
