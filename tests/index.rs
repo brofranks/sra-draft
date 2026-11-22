@@ -98,7 +98,7 @@ fn indexes_share_storage_by_exact_ordered_layout() {
         drop(index.full().apply(BoolOp::And, &foreign_index.full()));
     });
     rejects(message, || {
-        drop(index.full().apply(BoolOp::And, &other.full()))
+        drop(index.full().apply(BoolOp::And, &other.full()));
     });
     rejects(message, || drop(index.values(0, &[1], &[other.full()])));
     rejects(message, || drop(index.cases(0, &other.empty(), &[])));
@@ -128,9 +128,15 @@ fn rejected_capacity_leaves_the_index_registry_usable() {
         drop(Index::with_capacity(&cx, &[], 1, 0));
     });
     #[cfg(target_pointer_width = "64")]
-    rejects("index edge capacity overflow", || {
-        drop(Index::with_capacity(&cx, &[], 2, u32::MAX as usize + 1));
-    });
+    {
+        let overflow = u32::MAX as usize + 1;
+        rejects("index node capacity must fit", || {
+            drop(Index::with_capacity(&cx, &[], overflow, 0));
+        });
+        rejects("index edge capacity overflow", || {
+            drop(Index::with_capacity(&cx, &[], 2, overflow));
+        });
+    }
 }
 
 #[test]
@@ -333,6 +339,7 @@ fn mixed_boolean_operations_preserve_tuple_correlations() {
                 BoolOp::AndNot => in_p(x, y) && !in_q(x, y),
             });
         }
+        assert!(p.apply(BoolOp::Xor, &p).is_empty());
         assert_members(&p.not(), |x, y| !in_p(x, y));
         assert_members(&p.apply(BoolOp::AndNot, &r), |x, y| {
             in_p(x, y) && y != 1 && y != 3
@@ -345,22 +352,20 @@ fn mixed_boolean_operations_preserve_tuple_correlations() {
 
 #[test]
 fn boolean_memo_expires_when_switching_stores() {
-    let (cx, ids) = tiny();
-    let [first, second] = ids.map(|a| Index::with_capacity(&cx, &[a], 5, 8));
+    let (cx, [_, a]) = tiny();
+    let first = Index::with_capacity(&cx, &[a], 5, 8);
+    let second = Index::with_capacity(&cx, &[a, a], 5, 8);
     let x = point(&first, 0);
     let y = point(&first, 1);
     let _old = x.apply(BoolOp::Or, &y);
 
-    // Both stores have three nonterminal slots. Only the store identity
-    // distinguishes the first union from the second store's point at zero.
+    // The stores share their first algebra and have three nonterminal
+    // slots each. Only the index store distinguishes these memo keys.
     let p = point(&second, 2);
     let q = point(&second, 3);
     let _decoy = point(&second, 0);
     let union = p.apply(BoolOp::Or, &q);
-    assert_eq!(
-        [0, 1, 2, 3].map(|v| union.contains(&[v])),
-        [false, false, true, true]
-    );
+    assert_members(&union, |x, _| x >= 2);
 }
 
 #[test]
@@ -464,8 +469,11 @@ fn collection_and_destruction_release_one_partition_per_node() {
         assert_eq!(first.len(), 1);
         let duplicate = point(&index, 1);
         assert_eq!(backend.refs(), first);
-        assert!(duplicate.contains(&[1]));
-        drop((old, duplicate));
+        // Overlapping cases agree only when both designate the same root.
+        let all = index.context().t(index.algebra(0));
+        let common = index.cases(0, &old, &[(&all, &old), (&all, &duplicate)]);
+        assert!(common.contains(&[1]));
+        drop((old, duplicate, all, common));
         assert_eq!(backend.refs(), first);
 
         // The only nonterminal slot holds the unreferenced node. Its new
@@ -476,6 +484,6 @@ fn collection_and_destruction_release_one_partition_per_node() {
         assert_ne!(first, second);
         assert!(next.contains(&[2]));
         drop((next, index));
-        assert!(backend.refs().is_empty());
+        assert_eq!(backend.refs(), []);
     }
 }
