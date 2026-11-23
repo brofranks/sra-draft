@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use crate::backend::{Algebra, Align, BoolOp, Function, Refine, Values};
 use crate::idx;
+use crate::scalar::{self, ScalarKind};
 use crate::util::count::Count;
 use crate::util::dag::{Dag, Exhausted, Grow, Idx, Map, NeedGrowth, Read, Shared, structural_hash};
 
@@ -160,6 +161,53 @@ impl Build {
     }
 }
 
+/// Numbers transformed children in the original partition's class order.
+#[derive(Default)]
+struct Remap {
+    classes: Classes,
+    slots: Vec<u32>,
+}
+
+impl Remap {
+    /// Compacts the children in place and returns their partition.
+    ///
+    /// A single child needs no partition. Otherwise, retains the original
+    /// partition or quotients its merged classes. An owned alignment can be
+    /// transferred to the new node.
+    fn partition<'a, 'b>(
+        &mut self,
+        children: &'b mut [Id],
+        algebra: &'a dyn Algebra,
+        f: Function,
+        owned: Option<Held<'a>>,
+        align: &mut Align,
+    ) -> (&'b [Id], Option<Held<'a>>) {
+        self.classes.restart(children.len());
+        self.slots.clear();
+        let mut len = 0;
+        for i in 0..children.len() {
+            let child = children[i];
+            let slot = self.classes.slot(child, len);
+            if slot as usize == len {
+                children[len] = child;
+                len += 1;
+            }
+            self.slots.push(slot);
+        }
+        let partition = if len == 1 {
+            None
+        } else if len == children.len() {
+            Some(owned.unwrap_or_else(|| {
+                algebra.inc_ref(f);
+                Held::new(algebra, f)
+            }))
+        } else {
+            Some(Held::new(algebra, algebra.quotient(f, &self.slots, align)))
+        };
+        (&children[..len], partition)
+    }
+}
+
 #[derive(Default)]
 struct Scratch {
     memo: Map<(BoolOp, Id, Id), Id>,
@@ -170,8 +218,7 @@ struct Scratch {
     labels: Vec<(u32, u32)>,
     pending: Vec<(Id, Id)>,
     children: Vec<Id>,
-    slots: Vec<u32>,
-    classes: Classes,
+    remap: Remap,
     align: Align,
 }
 
@@ -359,34 +406,13 @@ impl State {
                     ..
                 } = parent;
                 let algebra = &*layout[level as usize].1;
-                let mut len = 0;
-                s.slots.clear();
-                s.classes.restart(s.children.len() - first);
-                // Compact this frame's children in their original class order.
-                for i in first..s.children.len() {
-                    let child = s.children[i];
-                    let slot = s.classes.slot(child, len);
-                    if slot as usize == len {
-                        s.children[first + len] = child;
-                        len += 1;
-                    }
-                    s.slots.push(slot);
-                }
-                let children = &s.children[first..first + len];
-                id = if len == 1 {
-                    children[0]
-                } else {
-                    let mut partition = if len != s.slots.len() {
-                        let q = Held::new(algebra, algebra.quotient(f, &s.slots, &mut s.align));
-                        drop(owned);
-                        q
-                    } else {
-                        owned.unwrap_or_else(|| {
-                            algebra.inc_ref(f);
-                            Held::new(algebra, f)
-                        })
-                    };
+                let (children, partition) =
+                    s.remap
+                        .partition(&mut s.children[first..], algebra, f, owned, &mut s.align);
+                id = if let Some(mut partition) = partition {
                     self.try_intern(level, &mut partition, children)?
+                } else {
+                    children[0]
                 };
                 s.children.truncate(first);
                 s.memo.insert(key, id);
@@ -533,6 +559,128 @@ impl Store {
                 return n.shift(bits[0] - bits[level]);
             };
             memo.insert(id, (level, n));
+            (id, next) = parent;
+        }
+    }
+
+    /// The rows with the least unsigned value at `level` for each prefix.
+    pub fn min_at(&self, root: Id, level: usize) -> Id {
+        assert!(level < self.layout.len(), "level exceeds the index arity");
+        let rank = self.layout[level].1.sort();
+        assert_ne!(
+            rank.kind(),
+            ScalarKind::Symbol,
+            "symbols have no numeric ordering"
+        );
+        if root == Id::FALSE {
+            return root;
+        }
+
+        // Each completed result owns a reference across later construction
+        // and collection. The source root retains its original descendants.
+        struct Results<'a> {
+            store: &'a Store,
+            roots: Map<Id, Id>,
+        }
+
+        impl Drop for Results<'_> {
+            fn drop(&mut self) {
+                for &id in self.roots.values() {
+                    self.store.dec_ref(id);
+                }
+            }
+        }
+
+        let mut memo = Results {
+            store: self,
+            roots: Map::default(),
+        };
+        let mut stack = Vec::new();
+        let mut scratch = Refine::default();
+        let mut least = Vec::new();
+        let mut children = Vec::new();
+        let mut remap = Remap::default();
+        let mut align = Align::default();
+        let (mut id, mut next) = (root, 0);
+        loop {
+            let node = {
+                let state = self.read();
+                let node = state.node(id);
+                if (node.level as usize) < level {
+                    if let Some(i) = node.edges[next..]
+                        .iter()
+                        .position(|c| *c != Id::FALSE && !memo.roots.contains_key(c))
+                    {
+                        stack.push((id, next + i + 1));
+                        (id, next) = (node.edges[next + i], 0);
+                        continue;
+                    }
+                    // The original partition also selects its empty class.
+                    // Preserve that edge when transforming a partial key domain.
+                    children.clear();
+                    children.extend(node.edges.iter().map(|c| {
+                        if *c == Id::FALSE {
+                            Id::FALSE
+                        } else {
+                            memo.roots[c]
+                        }
+                    }));
+                }
+                *node.value
+            };
+            let at = node.level as usize;
+            let result = if at >= level {
+                least.clear();
+                let child = if at > level {
+                    // A skipped rank admits every value, including zero.
+                    least.resize(rank.words(), 0);
+                    id
+                } else {
+                    let algebra = &*self.layout[level].1;
+                    let mut best = None;
+                    let _ = algebra.refine(
+                        node.partition,
+                        Function::TRUE,
+                        &mut scratch,
+                        &mut |i| i != node.hole,
+                        &mut |i, build| {
+                            let cell = Held::new(algebra, build());
+                            let mut members = algebra.members(cell.function());
+                            // Members arrive in unsigned order. Class numbers
+                            // do not determine which class has the least value.
+                            let value =
+                                members.next().expect("a partition cell must hold a member");
+                            if best.is_none() || scalar::compare(value, &least).is_lt() {
+                                least.clear();
+                                least.extend_from_slice(value);
+                                best = Some(i as usize);
+                            }
+                            ControlFlow::Continue(())
+                        },
+                    );
+                    let i = best.expect("a nonempty node must have a cell");
+                    self.read().node(id).edges[i]
+                };
+                self.values(level, &least, std::iter::once(child))
+            } else {
+                let (children, partition) = remap.partition(
+                    &mut children,
+                    &*self.layout[at].1,
+                    node.partition,
+                    None,
+                    &mut align,
+                );
+                if let Some(f) = partition {
+                    self.branch(at, f, children)
+                } else {
+                    self.inc_ref(children[0]);
+                    children[0]
+                }
+            };
+            let Some(parent) = stack.pop() else {
+                return result;
+            };
+            memo.roots.insert(id, result);
             (id, next) = parent;
         }
     }

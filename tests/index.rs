@@ -338,6 +338,132 @@ fn counting_survives_same_index_collection_during_cell_construction() {
     }
 }
 
+// --- per-key minimum ----
+
+#[test]
+fn minimum_only_quotients_key_partitions_whose_classes_merge() {
+    let [bdd, sparse] = reentrant_backends();
+    for (key, rank) in [(bdd.clone(), sparse.clone()), (sparse, bdd)] {
+        let mut cx = Context::empty();
+        cx.register_backend("key", key.clone());
+        cx.register_backend("rank", rank.clone());
+        let layout = ["key", "rank"].map(|name| cx.bind(name, BV2));
+        let index = Index::with_capacity(&cx, &layout, 8, 16);
+        let suffixes = [0b0001, 0b0011, 0b0101, 0b1001, 0b1100].map(|mask| {
+            let values: Vec<_> = (0..4).filter(|v| mask & (1 << v) != 0).collect();
+            index.values(1, &values, &vec![index.full(); values.len()])
+        });
+        for (which, expected, quotients) in [
+            (&[0_usize, 1, 2, 3][..], [Some(0); 4], 0),
+            (&[1, 2, 4][..], [Some(0), Some(0), Some(2), None], 1),
+            (&[1, 4][..], [Some(0), Some(2), None, None], 0),
+        ] {
+            let keys: Vec<_> = (0..which.len() as u64).collect();
+            let children: Vec<_> = which.iter().map(|&i| suffixes[i].clone()).collect();
+            let root = index.values(0, &keys, &children);
+            let before = key.calls();
+            let min = root.min_at(1);
+            let after = key.calls();
+            assert_eq!(after.refine, before.refine);
+            assert_eq!(after.cases, before.cases);
+            assert_eq!(after.quotient - before.quotient, quotients);
+            assert_members(&min, |x, y| expected[x as usize] == Some(y));
+        }
+        drop((suffixes, index, cx));
+        assert_eq!(key.refs(), []);
+        assert_eq!(rank.refs(), []);
+    }
+}
+
+#[test]
+fn minimum_at_an_inner_level_keeps_the_winning_suffix_in_either_order() {
+    let (cx, algebras) = tiny();
+    let native = algebras.map(|a| Index::with_capacity(&cx, &[a; 3], 8, 6));
+    let descending = reentrant_indexes(3, 8, 6).map(|(index, _)| index);
+    for index in native.into_iter().chain(descending) {
+        let suffix = index.values(2, &[1, 3], &[index.full(), index.full()]);
+        let other = index.values(2, &[2], &[index.full()]);
+        let middle = index.values(1, &[1, 3], &[suffix, other]);
+        let root = index.values(0, &[1, 2], &[middle, index.full()]);
+        let min = root.min_at(1);
+        for x in 0..4 {
+            for y in 0..4 {
+                for z in 0..4 {
+                    assert_eq!(
+                        min.contains(&[x, y, z]),
+                        (x == 1 && y == 1 && (z == 1 || z == 3)) || (x == 2 && y == 0),
+                        "tuple [{x}, {y}, {z}]"
+                    );
+                }
+            }
+        }
+        assert_eq!(min.count(), 6);
+    }
+}
+
+#[test]
+fn minimum_retains_parent_owned_descendants_through_growth() {
+    for skipped in [false, true] {
+        let (cx, algebras) = tiny();
+        for a in algebras {
+            // The source fills the edge arena. Only the source root retains
+            // its suffix when building the minimum needs fresh edges.
+            let index = Index::with_capacity(&cx, &[a; 3], 8, if skipped { 4 } else { 6 });
+            let child = index.values(2, &[3], &[index.full()]);
+            let middle = if skipped {
+                child
+            } else {
+                index.values(1, &[1, 3], &[child.clone(), child])
+            };
+            let root = index.values(0, &[2], &[middle]);
+            let min = root.min_at(1);
+            assert_eq!(min.count(), 1);
+            assert!(min.contains(&[2, u64::from(!skipped), 3]));
+            assert!(root.contains(&[2, 3, 3]));
+        }
+    }
+}
+
+#[test]
+fn minimum_handles_empty_full_and_incompatible_rank_columns() {
+    let (mut cx, [a, _]) = tiny();
+    let symbol = cx.bind("sparse", ScalarSort::symbol());
+    let index = Index::with_capacity(&cx, &[symbol, a], 5, 8);
+    let full = index.full().min_at(1);
+    assert!(full.contains(&[u64::MAX, 0]));
+    assert!(!full.contains(&[0, 1]));
+    assert_eq!(full.count(), Count::from(1).shift(64));
+    assert!(index.empty().min_at(1).is_empty());
+    rejects("symbols have no numeric ordering", || {
+        drop(index.empty().min_at(0));
+    });
+    rejects("level exceeds the index arity", || {
+        drop(index.full().min_at(2));
+    });
+}
+
+#[test]
+fn minimum_merges_key_classes_with_the_same_least_value() {
+    let (cx, [a, b]) = tiny();
+    let index = Index::with_capacity(&cx, &[a, b], 6, 12);
+    let left = index.values(1, &[1, 2], &[index.full(), index.full()]);
+    let right = index.values(1, &[1, 3], &[index.full(), index.full()]);
+    let root = index.values(
+        0,
+        &[0, 1, 2, 3],
+        &[left.clone(), right.clone(), left.clone(), right.clone()],
+    );
+    let min = root.min_at(1);
+    assert_members(&min, |_, y| y == 1);
+    let partial = index.values(0, &[0, 1], &[left, right]).min_at(1);
+    assert_members(&partial, |x, y| x < 2 && y == 1);
+    // Overlapping cases must identify the same live root. Covering all key
+    // classes with one minimum collapses the key level.
+    let direct = index.values(1, &[1], &[index.full()]);
+    let all = cx.t(a);
+    drop(index.cases(0, &index.empty(), &[(&all, &min), (&all, &direct)]));
+}
+
 // --- Boolean operations ----
 
 #[test]
@@ -529,6 +655,23 @@ fn counting_releases_each_selected_scalar_cell() {
         let before = backend.refs();
         assert_eq!(root.count(), 1);
         assert_eq!(backend.refs(), before);
+    }
+}
+
+#[test]
+fn minimum_releases_each_scalar_cell() {
+    for (index, backend) in reentrant_indexes(2, 8, 16) {
+        let low = index.values(1, &[1, 2], &[index.full(), index.full()]);
+        let high = index.values(1, &[2, 3], &[index.full(), index.full()]);
+        let root = index.values(0, &[0, 3], &[low, high]);
+        // Only the two rank nodes need scalar cells. The key partition
+        // still selects distinct suffixes after taking the minimum.
+        let before = backend.calls().refine;
+        let min = root.min_at(1);
+        assert_eq!(backend.calls().refine - before, 2);
+        assert_members(&min, |x, y| (x, y) == (0, 1) || (x, y) == (3, 2));
+        drop((min, root, index));
+        assert_eq!(backend.refs(), []);
     }
 }
 
