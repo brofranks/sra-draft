@@ -25,6 +25,8 @@ pub struct Calls {
     pub align: usize,
     pub refine: usize,
     pub dec_refs: usize,
+    pub quotient: usize,
+    pub cases: usize,
 }
 
 #[derive(Clone)]
@@ -150,10 +152,12 @@ impl Algebra for Reentrant {
     }
 
     fn quotient(&self, f: Function, classes: &[u32], scratch: &mut Align) -> Function {
+        self.calls.lock().unwrap().quotient += 1;
         self.own(self.algebra.quotient(f, classes, scratch))
     }
 
     fn cases(&self, default: u32, cases: &[(Function, u32)], labels: &mut Vec<u32>) -> Function {
+        self.calls.lock().unwrap().cases += 1;
         self.own(self.algebra.cases(default, cases, labels))
     }
 
@@ -182,14 +186,28 @@ impl Algebra for Reentrant {
         then: &mut dyn FnMut(u32, &mut dyn FnMut() -> Function) -> ControlFlow<()>,
     ) -> ControlFlow<()> {
         self.calls.lock().unwrap().refine += 1;
-        self.algebra.refine(f, p, scratch, select, &mut |i, build| {
-            then(i, &mut || {
-                if let Some(run) = ON_CELL.take() {
-                    run();
+        // Visit the BV2 cells in descending order of their least member.
+        let mut classes = Vec::new();
+        for value in 0..4 {
+            if self.algebra.evaluate(p, &[value]) != 0 {
+                let i = self.algebra.evaluate(f, &[value]);
+                if !classes.contains(&i) {
+                    classes.push(i);
                 }
-                self.own(build())
-            })
-        })
+            }
+        }
+        for i in classes.into_iter().rev().filter(|&i| select(i)) {
+            self.algebra
+                .refine(f, p, scratch, &mut |j| j == i, &mut |j, build| {
+                    then(j, &mut || {
+                        if let Some(run) = ON_CELL.take() {
+                            run();
+                        }
+                        self.own(build())
+                    })
+                })?;
+        }
+        ControlFlow::Continue(())
     }
 
     fn members(&self, p: Function) -> Box<dyn Cursor + '_> {
