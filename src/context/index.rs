@@ -263,6 +263,18 @@ impl IndexRoot {
         self.index.store.count(self.id)
     }
 
+    /// The rows with the least unsigned value at `level` under each prefix.
+    ///
+    /// Each prefix keeps every suffix of its winning value. A prefix that
+    /// skips the selected level admits its whole sort, so zero wins there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the level is outside the layout or has a symbol sort.
+    pub fn min_at(&self, level: usize) -> Self {
+        self.index.adopt(self.index.store.min_at(self.id, level))
+    }
+
     /// The native Boolean combination of two tuple sets in the same index.
     ///
     /// # Panics

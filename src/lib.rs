@@ -1,5 +1,4 @@
-//! Storage, logical declarations, bound rows, scalar algebra, and native
-//! indexes for symbolic and concrete relations.
+//! Stored symbolic and concrete relations over bound rows and native indexes.
 #![warn(missing_docs)]
 
 pub mod util;
@@ -11,6 +10,7 @@ mod cache;
 pub mod context;
 pub use context::index;
 mod index_store;
+pub mod rel;
 pub mod row;
 pub mod scalar;
 pub mod sparse;
