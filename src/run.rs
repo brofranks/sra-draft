@@ -518,12 +518,10 @@ impl Exec for () {
 /// Refines the cells in `cells` against `root`, running `then` on each
 /// accepting branch.
 ///
-/// Each level keeps a heap frame rather than a native one, so the stack depth
-/// stays independent of the row width. A level suspends its refinement while
-/// a child is explored and resumes it only when the child continues, so it
-/// builds one cell per explored child and nothing for siblings after a break.
-/// The invocation retains its native source root throughout the walk, so
-/// every yielded child stays reachable.
+/// Recurses natively once per level. A level suspends its refinement while a
+/// child is explored and resumes it only when the child continues. The
+/// invocation retains its native source root throughout the walk, so every
+/// yielded child stays reachable.
 fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
     root: Residual<'_>,
     cells: Range<usize>,
@@ -532,107 +530,67 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
     mode: &mut M,
     then: &mut K,
 ) -> Flow<M> {
-    /// One level whose suffix is in progress.
-    struct Frame<'a, M: Mode> {
-        cell: usize,
-        level: usize,
-        state: M::Level,
-        root: Residual<'a>,
-        /// The suspended refinement and the sum over the explored cells, or
-        /// `None` for a skipped level.
-        sum: Option<(Refine, M::Sum)>,
-        /// The undo mark of the cell being explored.
-        mark: usize,
+    descend(root, 0, cells, eval, memo, mode, then)
+}
+
+fn descend<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
+    root: Residual<'_>,
+    level: usize,
+    cells: Range<usize>,
+    eval: &mut Run<'_>,
+    memo: &mut M::Memo,
+    mode: &mut M,
+    then: &mut K,
+) -> Flow<M> {
+    // An unobserved, unrestricted trailing suffix already has a witness in
+    // this nonempty residual.
+    if level == cells.len() {
+        return then(eval, mode);
     }
-    let mut frames: Vec<Frame<'_, M>> = Vec::new();
-    let mut next = Some((root, 0));
-    let mut result = None;
-    loop {
-        if let Some((root, level)) = next.take() {
-            // An unobserved, unrestricted trailing suffix already has a
-            // witness in this nonempty residual.
-            if level == cells.len() {
-                result = Some(then(eval, mode));
-            } else {
-                let cell = eval.maps[cells.start + level];
-                let (state, cached) = mode.enter(memo, root.key(), level, eval);
-                if let Some(flow) = cached {
-                    result = Some(mode.exit(memo, level, state, eval, flow));
-                } else if root.level() > level {
-                    // A skipped source level admits the full field universe
-                    // and can adopt the other source's algebra.
-                    debug_assert_eq!(eval.reads.last(), Some(&cell));
-                    eval.pop_reads(1);
-                    frames.push(Frame {
-                        cell,
-                        level,
-                        state,
-                        root,
-                        sum: None,
-                        mark: 0,
-                    });
-                    next = Some((root, level + 1));
-                    continue;
-                } else {
-                    let mut scratch = eval.refine.pop().unwrap_or_default();
-                    let Cell {
-                        algebra, function, ..
-                    } = eval.cells[cell];
-                    root.refine(algebra, function, &mut scratch);
-                    frames.push(Frame {
-                        cell,
-                        level,
-                        state,
-                        root,
-                        sum: Some((scratch, mode.sum())),
-                        mark: 0,
-                    });
-                }
+    let cell = eval.maps[cells.start + level];
+    let (state, cached) = mode.enter(memo, root.key(), level, eval);
+    if let Some(flow) = cached {
+        return mode.exit(memo, level, state, eval, flow);
+    }
+    let flow = if root.level() > level {
+        // A skipped source level admits the full field universe and can
+        // adopt the other source's algebra.
+        debug_assert_eq!(eval.reads.last(), Some(&cell));
+        eval.pop_reads(1);
+        let flow = descend(root, level + 1, cells, eval, memo, mode, then);
+        eval.push_read(cell);
+        flow
+    } else {
+        let mut scratch = eval.refine.pop().unwrap_or_default();
+        let Cell {
+            algebra, function, ..
+        } = eval.cells[cell];
+        root.refine(algebra, function, &mut scratch);
+        let mut sum = mode.sum();
+        let flow = loop {
+            let Some(child) = root.next(algebra, &mut scratch) else {
+                break ControlFlow::Continue(mode.finish_sum(sum));
+            };
+            let p = eval.cx.resolve(algebra).cell(&mut scratch);
+            let Some(mark) = eval.tighten(cell, p) else {
+                let empty = mode.identity();
+                mode.push(&mut sum, cell, empty);
+                continue;
+            };
+            debug_assert_eq!(eval.reads.last(), Some(&cell));
+            eval.pop_reads(1);
+            let flow = descend(child, level + 1, cells.clone(), eval, memo, mode, then);
+            eval.push_read(cell);
+            eval.restore(mark);
+            match flow {
+                ControlFlow::Continue(value) => mode.push(&mut sum, cell, value),
+                ControlFlow::Break(b) => break ControlFlow::Break(b),
             }
-        }
-        let Some(frame) = frames.last_mut() else {
-            return result.expect("an empty walk yields its continuation's result");
         };
-        if let Some(flow) = result.take() {
-            eval.push_read(frame.cell);
-            match (&mut frame.sum, flow) {
-                (Some((_, sum)), ControlFlow::Continue(value)) => {
-                    eval.restore(frame.mark);
-                    mode.push(sum, frame.cell, value);
-                }
-                (sum, flow) => {
-                    if sum.is_some() {
-                        eval.restore(frame.mark);
-                    }
-                    let f = frames.pop().unwrap();
-                    eval.refine.extend(f.sum.map(|(scratch, _)| scratch));
-                    result = Some(mode.exit(memo, f.level, f.state, eval, flow));
-                    continue;
-                }
-            }
-        }
-        let (scratch, sum) = frame.sum.as_mut().unwrap();
-        let algebra = eval.cells[frame.cell].algebra;
-        while let Some(child) = frame.root.next(algebra, scratch) {
-            let p = eval.cx.resolve(algebra).cell(scratch);
-            if let Some(mark) = eval.tighten(frame.cell, p) {
-                frame.mark = mark;
-                debug_assert_eq!(eval.reads.last(), Some(&frame.cell));
-                eval.pop_reads(1);
-                next = Some((child, frame.level + 1));
-                break;
-            }
-            let empty = mode.identity();
-            mode.push(sum, frame.cell, empty);
-        }
-        if next.is_none() {
-            let f = frames.pop().unwrap();
-            let (scratch, sum) = f.sum.unwrap();
-            eval.refine.push(scratch);
-            let out = mode.finish_sum(sum);
-            result = Some(mode.exit(memo, f.level, f.state, eval, ControlFlow::Continue(out)));
-        }
-    }
+        eval.refine.push(scratch);
+        flow
+    };
+    mode.exit(memo, level, state, eval, flow)
 }
 
 /// A stored source leaf.
