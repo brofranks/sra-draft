@@ -24,7 +24,7 @@ def sample(stop,stats):
         stats[0]=max(stats[0],total/1024)
         stats[1]=min(stats[1],avail())
         stop.wait(1)
-print('CPUs',len(os.sched_getaffinity(0)),'mem',P('/proc/meminfo').read_text().splitlines()[0], 'quota',P('/sys/fs/cgroup/cpu.max').read_text().strip())
+print('CPUs',len(os.sched_getaffinity(0)),'mem',P('/proc/meminfo').read_text().splitlines()[0])
 for n in [1,2,4]:
     stats=[0,avail()]; stop=threading.Event(); thread=threading.Thread(target=sample,args=(stop,stats));thread.start()
     t=time.monotonic(); c=cpu()
