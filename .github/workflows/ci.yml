@@ -53,10 +53,10 @@ jobs:
         target: [x86_64-unknown-linux-gnu, i686-unknown-linux-gnu]
         borrows: [stacked, tree]
         shard:
-          # Run row and relation suites here to balance the integration shards.
-          - { id: library, args: "--lib --test row --test rel" }
-          - { id: integration-ab, args: "--test '[ab]*'" }
-          - { id: queries, args: "--test map --test query --test run" }
+          # Keep the query and soundness suites within the Miri job budget.
+          - { id: library, args: "--lib --test row --test rel --test run" }
+          - { id: integration-ab, args: "--test '[ab]*' --test map" }
+          - { id: queries, args: "--test query" }
           - { id: integration-rest, args: "--test '[!abmqr]*'" }
     name: miri (${{ matrix.target }}, ${{ matrix.borrows }} borrows, ${{ matrix.shard.id }})
     runs-on: ubuntu-latest

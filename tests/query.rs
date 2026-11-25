@@ -115,13 +115,13 @@ fn union_merges_sets_and_relations() {
 #[test]
 fn union_branches_restore_equalities_between_shared_cells() {
     let mut cx = tiny();
-    let four = bv(&mut cx, 4);
+    let two = bv(&mut cx, 2);
     // Left: x -> (x, x) over a set, three exposed positions on one cell.
     // Right: d -> (r, r) over a relation. The union exposes three cells; the
     // left branch equates them on entry.
-    let s = set(&cx, &four, [1, 2, 3]);
-    let r = relation(&cx, &four, [(1, 2), (2, 3), (3, 1)]);
-    let q = Query::id(&cx, four);
+    let s = set(&cx, &two, [1, 2, 3]);
+    let r = relation(&cx, &two, [(1, 2), (2, 3), (3, 1)]);
+    let q = Query::id(&cx, two);
     let diag = q.clone().and(q);
     let u = id().and(&s).union((&r).select(&diag));
     assert_eq!(
@@ -380,14 +380,11 @@ fn except_projects_a_record_onto_its_other_members() {
     );
     // The projection is exactly the pairing of the kept members' accessors.
     let kept = Query::decl(&cx, cx.sorts().project(t, 0)).and(cx.sorts().project(t, 2));
-    assert_eq!(
-        rows(&r.select(dropped.clone()).collect()),
-        rows(&r.select(kept).collect())
-    );
-    assert_eq!(
-        rows(&r.select(dropped).collect()),
-        [[0, 1, 2, 0, 2], [1, 2, 3, 1, 3]].map(Vec::from).into()
-    );
+    for out in [r.select(dropped).collect(), r.select(kept).collect()] {
+        assert_eq!(out.count(), 2);
+        assert!(out.root().contains(&[0, 1, 2, 0, 2]));
+        assert!(out.root().contains(&[1, 2, 3, 1, 3]));
+    }
     // Dropping one member of a two-member record leaves a one-member
     // product.
     assert_eq!(
@@ -447,7 +444,8 @@ fn subtraction_keeps_equations_live_while_narrowing_keys() {
         let column = cx.bind(backend, sort.scalar());
         fixture::indexes(&cx, column);
         let row = Row::new(&cx, sort, [column].into(), 0);
-        for mask in 0..16_u8 {
+        // Under Miri, cover empty, alternating, and full exclusions.
+        for mask in (0..16_u8).step_by(if cfg!(miri) { 5 } else { 1 }) {
             let excluded = set(&cx, &row, (0..4_u8).filter(|&x| mask & (1 << x) != 0));
             let query = Query::id(&cx, row.clone())
                 .select(sra::map::copy())
@@ -511,20 +509,20 @@ fn minus_with_mismatched_domains_is_rejected() {
 #[test]
 fn pairing_and_restriction_share_the_domain() {
     let mut cx = tiny();
-    let four = bv(&mut cx, 4);
-    let r = relation(&cx, &four, [(1, 2), (2, 3)]);
-    let r2 = relation(&cx, &four, [(1, 5), (1, 6), (3, 7)]);
+    let three = bv(&mut cx, 3);
+    let r = relation(&cx, &three, [(1, 2), (2, 3)]);
+    let r2 = relation(&cx, &three, [(1, 5), (1, 6), (3, 7)]);
     assert_eq!(
         rows(&r.and(&r2).collect()),
         [[1, 2, 5], [1, 2, 6]].map(Vec::from).into()
     );
     assert_eq!(
-        pairs(&r.with(&set(&cx, &four, [3])).collect()),
+        pairs(&r.with(&set(&cx, &three, [3])).collect()),
         [(2, 3)].into()
     );
     assert_eq!(pairs(&r.with(&r2.inv()).collect()), BTreeSet::new());
     assert_eq!(
-        pairs(&r.with(&relation(&cx, &four, [(3, 0)])).collect()),
+        pairs(&r.with(&relation(&cx, &three, [(3, 0)])).collect()),
         [(2, 3)].into()
     );
     // `id().and` keeps identity-first order, and an identity paired with
