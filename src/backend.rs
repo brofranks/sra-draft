@@ -515,6 +515,17 @@ pub trait Algebra: Send + Sync {
     /// Panics if `value` is not an encoding in the sort.
     fn evaluate(&self, f: Function, value: &[u64]) -> u32;
 
+    /// Scratch ladder: appends the non-hole runs `(lo, hi, class)` of a packed
+    /// partition.
+    fn ground_runs(&self, _: Function, _: u32, _: &mut Vec<(u64, u64, u32)>) {
+        panic!("ground scan requires a packed sparse column")
+    }
+
+    /// Scratch ladder: this algebra as a concrete packed sparse table.
+    fn as_packed(&self) -> Option<&crate::sparse::SparseAlgebra<crate::sparse::Packed>> {
+        None
+    }
+
     /// The exact number of values a predicate accepts, counted symbolically.
     ///
     /// # Panics

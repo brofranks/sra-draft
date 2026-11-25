@@ -324,7 +324,30 @@ pub struct Residual<'a> {
     node: Node,
 }
 
-impl Residual<'_> {
+impl<'a> Residual<'a> {
+    /// Scratch ladder: this level's algebra.
+    #[inline(always)]
+    pub fn algebra(self) -> &'a dyn crate::backend::Algebra {
+        self.index.cx.resolve(self.index.algebra(self.level()))
+    }
+
+    /// Scratch ladder: this level's partition and hole class.
+    #[inline(always)]
+    pub fn partition(self) -> (Function, u32) {
+        (self.node.partition, self.node.hole)
+    }
+
+    /// Scratch ladder: the child in class `class`.
+    #[inline(always)]
+    pub fn child(self, class: u32) -> Self {
+        let (id, node) = self.index.store.child(self.id, class);
+        Self {
+            index: self.index,
+            id,
+            node,
+        }
+    }
+
     /// The memo key in this source index during the lifetime of its root.
     #[inline(always)]
     pub fn key(self) -> usize {

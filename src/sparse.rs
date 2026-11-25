@@ -43,7 +43,7 @@ struct Node {
 /// using eight bytes per transition. Wider sorts store the key words followed
 /// by a payload word. Every reader and writer of edge words uses the layout.
 /// Each binding interprets shared edge words at its own stride.
-trait Layout: Copy + Send + Sync + 'static {
+pub trait Layout: Copy + Send + Sync + 'static {
     /// One transition's key: the packed word's high half, or a borrowed
     /// key-word slice.
     type Key<'a>: Copy;
@@ -63,7 +63,7 @@ trait Layout: Copy + Send + Sync + 'static {
 }
 
 #[derive(Clone, Copy)]
-struct Packed;
+pub struct Packed;
 
 impl Layout for Packed {
     type Key<'a> = u64;
@@ -490,13 +490,47 @@ impl<L: Layout> Drop for SparseCursor<'_, L> {
 
 /// A sparse table bound to one scalar sort, with the transition layout its
 /// width selects.
-struct SparseAlgebra<L> {
+pub struct SparseAlgebra<L> {
     store: Arc<SparseStore>,
     sort: ScalarSort,
     l: L,
 }
 
 impl<L: Layout> SparseAlgebra<L> {
+    /// Scratch ladder: the payload of the run holding `value`, callable
+    /// without dynamic dispatch.
+    #[inline(always)]
+    pub fn eval_at(&self, f: Function, value: &[u64]) -> u32 {
+        assert!(self.sort.accepts(value), "value is outside the scalar sort");
+        let l = self.l;
+        let state = self.store.shared.read(self.store.threads);
+        debug_assert!(state.has_refs(f), "cannot use an unreferenced sparse node");
+        let node = state.node(f);
+        let i = search(l, node.edges, l.decode(value));
+        run_payload(l, node.initial, node.edges, i)
+    }
+
+    /// Scratch ladder: appends the non-hole runs `(lo, hi, class)` of a packed
+    /// partition.
+    #[inline(always)]
+    pub fn ground_runs_at(&self, f: Function, hole: u32, out: &mut Vec<(u64, u64, u32)>) {
+        assert_eq!(self.l.stride(), 1);
+        let state = self.store.shared.read(self.store.threads);
+        let node = state.node(f);
+        let (mut lo, mut slot) = (0u64, node.initial);
+        for &entry in node.edges {
+            let hi = entry >> 32;
+            if slot != hole && lo < hi {
+                out.push((lo, hi, slot));
+            }
+            lo = hi;
+            slot = entry as u32;
+        }
+        if slot != hole {
+            out.push((lo, 1u64 << self.sort.width(), slot));
+        }
+    }
+
     /// The images of `p` under `map` within `q`, or with `image` false, the
     /// members of `p` whose image lies in `q`.
     fn transfer(&self, map: &MapSpec, p: Function, q: Function, image: bool) -> Function {
@@ -581,13 +615,15 @@ impl<L: Layout> Algebra for SparseAlgebra<L> {
 
     /// The payload of the run holding `value`.
     fn evaluate(&self, f: Function, value: &[u64]) -> u32 {
-        assert!(self.sort.accepts(value), "value is outside the scalar sort");
-        let l = self.l;
-        let state = self.store.shared.read(self.store.threads);
-        debug_assert!(state.has_refs(f), "cannot use an unreferenced sparse node");
-        let node = state.node(f);
-        let i = search(l, node.edges, l.decode(value));
-        run_payload(l, node.initial, node.edges, i)
+        self.eval_at(f, value)
+    }
+
+    fn ground_runs(&self, f: Function, hole: u32, out: &mut Vec<(u64, u64, u32)>) {
+        self.ground_runs_at(f, hole, out);
+    }
+
+    fn as_packed(&self) -> Option<&SparseAlgebra<Packed>> {
+        (self as &dyn std::any::Any).downcast_ref()
     }
 
     /// The number of members of predicate `p`, summed over its runs.
