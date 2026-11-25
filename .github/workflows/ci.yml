@@ -54,10 +54,10 @@ jobs:
         borrows: [stacked, tree]
         shard:
           # Keep the query and soundness suites within the Miri job budget.
-          - { id: library, args: "--lib --test row --test rel --test run" }
-          - { id: integration-ab, args: "--test '[ab]*'" }
-          - { id: queries, args: "--test query --test map" }
-          - { id: integration-rest, args: "--test '[!abmqr]*'" }
+          - { id: library, targets: "--lib tests/r*.rs" }
+          - { id: integration-ab, targets: "tests/[ab]*.rs" }
+          - { id: queries, targets: "tests/[mq]*.rs" }
+          - { id: integration-rest, targets: "tests/[!abmqr]*.rs" }
     name: miri (${{ matrix.target }}, ${{ matrix.borrows }} borrows, ${{ matrix.shard.id }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -70,7 +70,12 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install "${RUSTUP_TOOLCHAIN}" --profile minimal --component miri,rust-src
       # Tests too slow for Miri opt out with `cfg_attr(miri, ignore)`.
-      - run: cargo miri test --locked --target ${{ matrix.target }} ${{ matrix.shard.args }}
+      # Each interpreter uses one host thread. Run two test binaries together.
+      - run: |
+          cargo miri setup --target ${{ matrix.target }}
+          printf '%s\n' ${{ matrix.shard.targets }} |
+            sed -E 's@^tests/(.*)\.rs$@--test=\1@' |
+            xargs -n1 -P2 cargo miri test --locked --target ${{ matrix.target }}
       # Cargo cannot select doctests together with other targets.
       - if: matrix.shard.id == 'library'
         run: cargo miri test --locked --target ${{ matrix.target }} --doc
