@@ -4,7 +4,7 @@
 //! The `Table` fixture is a four-value truth-table backend that counts the
 //! references on each root it hands out and the refinement cells it builds,
 //! so tests can observe leaked or multiply released roots, noncanonical
-//! tokens, and cells built ahead of an early exit. Local fixtures construct
+//! tokens, and cells built ahead of their branch. Local fixtures construct
 //! relations, bind bit-vector rows, build sets, and list ground pairs, rows,
 //! and set values.
 
@@ -507,25 +507,30 @@ impl Algebra for Table {
         self.partition(values, labels)
     }
 
-    fn refine(
-        &self,
-        f: Function,
-        p: Function,
-        _: &mut Refine,
-        select: &mut dyn FnMut(u32) -> bool,
-        then: &mut dyn FnMut(u32, &mut dyn FnMut() -> Function) -> ControlFlow<()>,
-    ) -> ControlFlow<()> {
-        let (slots, values) = (self.get(f), self.get(p));
-        for slot in 0..=slots.into_iter().max().unwrap() {
-            let cell = std::array::from_fn(|i| u32::from(slots[i] == slot && values[i] != 0));
-            if cell != [0; 4] && select(slot) {
-                then(slot, &mut || {
-                    self.0.lock().unwrap().builds += 1;
-                    self.put(cell)
-                })?;
+    fn refine(&self, f: Function, p: Function, scratch: &mut Refine) {
+        (scratch.f, scratch.p, scratch.position) = (f, p, Some(0));
+    }
+
+    fn next(&self, scratch: &mut Refine, select: &mut dyn FnMut(u32) -> bool) -> Option<u32> {
+        let (slots, values) = (self.get(scratch.f), self.get(scratch.p));
+        let position = scratch.position.as_mut().unwrap();
+        while *position <= slots.into_iter().max().unwrap() as usize {
+            let slot = *position as u32;
+            *position += 1;
+            if (0..4).any(|i| slots[i] == slot && values[i] != 0) && select(slot) {
+                scratch.class = slot;
+                return Some(slot);
             }
         }
-        ControlFlow::Continue(())
+        None
+    }
+
+    fn cell(&self, scratch: &mut Refine) -> Function {
+        let (slots, values) = (self.get(scratch.f), self.get(scratch.p));
+        self.0.lock().unwrap().builds += 1;
+        self.put(std::array::from_fn(|i| {
+            u32::from(slots[i] == scratch.class && values[i] != 0)
+        }))
     }
 
     fn members(&self, p: Function) -> Box<dyn sra::backend::Cursor + '_> {
@@ -612,40 +617,58 @@ fn nested_narrowings_release_roots_on_return_break_and_panic() {
     }
 }
 
+/// The diagonal over the two-bit `table` row and that row, with the builds
+/// counter of `table` reset.
+fn diagonal(table: &Table) -> (Context, Row, Rel) {
+    let mut cx = tiny();
+    cx.register_backend("table", table.clone());
+    let t = cx.sorts().record("T", &[("value", cx.sorts().bv(2))]);
+    cx.bind_field(cx.sorts().project(t, 0), "table");
+    let field = cx.sorts().project(t, 0);
+    let two = Row::bind(&mut cx, field);
+    fixture::indexes(&cx, two.scalar_algebra());
+    let mut d = Rel::new(&cx, two.clone(), two.clone());
+    d.insert_rows((0..4_u8).map(|x| (x, x)));
+    table.0.lock().unwrap().builds = 0;
+    (cx, two, d)
+}
+
 #[test]
-fn a_walk_builds_one_cell_per_level_before_a_break_and_releases_the_rest() {
+fn a_walk_builds_each_cell_only_when_its_branch_is_explored() {
+    let table = Table::new();
+    let (cx, two, d) = diagonal(&table);
+    let builds = || table.0.lock().unwrap().builds;
+    // Each row builds one cell per level, and no sibling is built ahead.
+    let mut seen = Vec::new();
+    let _ = sra::query::source(&d).drive(&mut |_, _| {
+        seen.push(builds());
+        ControlFlow::<()>::Continue(())
+    });
+    assert_eq!(seen, [2, 4, 6, 8]);
+
+    // A branch rejected downstream builds no cell beyond those it visited.
+    let s = set(&cx, &two, [1, 2, 3]);
+    table.0.lock().unwrap().builds = 0;
+    seen.clear();
+    let _ = d.select(&s).drive(&mut |_, _| {
+        seen.push(builds());
+        ControlFlow::<()>::Continue(())
+    });
+    assert_eq!(seen, [5, 8, 11]);
+}
+
+#[test]
+fn a_walk_releases_its_cells_after_completion_break_and_panic() {
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     let table = Table::new();
-    let mut cx = tiny();
-    cx.register_backend("table", table.clone());
-    let two = cx.sorts().bv(2);
-    let t = cx
-        .sorts()
-        .record("T", &[("a", two), ("b", two), ("c", two)]);
-    for i in 0..3 {
-        cx.bind_field(cx.sorts().project(t, i), "table");
-    }
-    let row = Row::bind(&mut cx, t);
-    let algebras = row.algebras().to_vec();
-    sra::index::Index::with_capacity(&cx, &algebras, 32, 64);
-    let mut rel = Rel::new_set(&cx, row);
-    // The even-parity rows give two distinct children at each of the first two
-    // levels, so those levels have a sibling left to build at the first row.
-    for r in [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]] {
-        let cells: Vec<_> = algebras
-            .iter()
-            .zip(r)
-            .map(|(&a, v)| cx.set(a, &[v]))
-            .collect();
-        rel.insert(cells.as_slice());
-    }
+    let (_cx, _, d) = diagonal(&table);
     let before = table.refs();
     for exit in 0..3 {
         table.0.lock().unwrap().builds = 0;
         let mut rows = 0;
         let result = catch_unwind(AssertUnwindSafe(|| {
-            sra::query::source(&rel).drive(&mut |_, _| {
+            sra::query::source(&d).drive(&mut |_, _| {
                 rows += 1;
                 match exit {
                     0 => ControlFlow::Continue(()),
@@ -656,9 +679,7 @@ fn a_walk_builds_one_cell_per_level_before_a_break_and_releases_the_rest() {
         }));
         assert_eq!(result.is_err(), exit == 2);
         assert_eq!(rows, if exit == 0 { 4 } else { 1 });
-        if exit != 0 {
-            assert_eq!(table.0.lock().unwrap().builds, algebras.len());
-        }
+        assert_eq!(table.0.lock().unwrap().builds, 2 * rows);
         assert_eq!(table.refs(), before);
     }
 }

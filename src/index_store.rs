@@ -5,7 +5,6 @@
 //! delivery takes place outside both stores' guards.
 
 use std::cell::Cell;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use crate::backend::{Algebra, Align, BoolOp, Function, Refine, Values};
@@ -537,24 +536,18 @@ impl Store {
             let level = node.level as usize;
             let algebra = &*self.layout[level].1;
             let mut n = Count::ZERO;
-            let _ = algebra.refine(
-                node.partition,
-                Function::TRUE,
-                &mut scratch,
-                &mut |i| i != node.hole,
-                &mut |i, build| {
-                    let child = self.read().node(id).edges[i as usize];
-                    let cell = Held::new(algebra, build());
-                    let members = algebra.count(cell.function());
-                    n += if child == Id::TRUE {
-                        members.shift(bits[level + 1])
-                    } else {
-                        let (lower, count) = &memo[&child];
-                        (&members * count).shift(bits[level + 1] - bits[*lower])
-                    };
-                    ControlFlow::Continue(())
-                },
-            );
+            algebra.refine(node.partition, Function::TRUE, &mut scratch);
+            while let Some(i) = algebra.next(&mut scratch, &mut |i| i != node.hole) {
+                let child = self.read().node(id).edges[i as usize];
+                let cell = Held::new(algebra, algebra.cell(&mut scratch));
+                let members = algebra.count(cell.function());
+                n += if child == Id::TRUE {
+                    members.shift(bits[level + 1])
+                } else {
+                    let (lower, count) = &memo[&child];
+                    (&members * count).shift(bits[level + 1] - bits[*lower])
+                };
+            }
             let Some(parent) = stack.pop() else {
                 return n.shift(bits[0] - bits[level]);
             };

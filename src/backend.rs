@@ -5,7 +5,6 @@
 //! binding to the same store and sort.
 
 use std::fmt;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 pub use crate::cache::Cache;
@@ -271,11 +270,11 @@ impl Groups {
         self.len + self.declined.len()
     }
 
-    /// The selected classes and their initial payloads and transition buffers.
+    /// The `i`th selected class and its initial payload and transition buffer.
     #[inline(always)]
-    pub fn selected(&mut self) -> impl Iterator<Item = (u32, u32, &mut Vec<u64>)> {
+    pub fn selected(&mut self, i: usize) -> Option<(u32, u32, &mut Vec<u64>)> {
         self.groups[..self.len]
-            .iter_mut()
+            .get_mut(i)
             .map(|(class, initial, transitions)| (*class, *initial, transitions))
     }
 
@@ -341,12 +340,22 @@ impl Groups {
     }
 }
 
-/// Caller-owned working memory for [`Algebra::refine`].
+/// Caller-owned working memory and progress for one [`Algebra::refine`].
 ///
-/// A delivered cell may start a nested refinement, so callers keep one `Refine`
-/// per nesting level and reuse it across sibling calls.
-#[derive(Debug, Default)]
+/// A yielded cell may start a nested refinement, so callers keep one `Refine`
+/// per nesting level and reuse it across sibling refinements.
+#[derive(Debug)]
 pub struct Refine {
+    /// The partition being refined.
+    pub f: Function,
+    /// The restriction being refined by.
+    pub p: Function,
+    /// The class most recently yielded.
+    pub class: u32,
+    /// The next selected group to yield, or `None` before the groups are swept.
+    pub position: Option<usize>,
+    /// Whether the cells come from flipping the payloads of a Boolean map.
+    pub identity: bool,
     /// Buffered transitions for selected classes.
     pub groups: Groups,
     /// Node pairs of the product still to discover.
@@ -355,6 +364,22 @@ pub struct Refine {
     pub seen: Set<(Function, Function)>,
     /// Product nodes already interned while building one cell.
     pub memo: Map<(Function, Function), Function>,
+}
+
+impl Default for Refine {
+    fn default() -> Self {
+        Self {
+            f: Function::FALSE,
+            p: Function::FALSE,
+            class: 0,
+            position: None,
+            identity: false,
+            groups: Groups::default(),
+            stack: Vec::new(),
+            seen: Set::default(),
+            memo: Map::default(),
+        }
+    }
 }
 
 /// Caller-owned working memory for [`Algebra::values`].
@@ -642,37 +667,38 @@ pub trait Algebra: Send + Sync {
         scratch: &mut Values,
     ) -> Function;
 
-    /// Visits the selected nonempty cells `p intersect f^-1(i)` in unspecified
-    /// order.
+    /// Begins refining `f` by `p` in `scratch`, which yields the selected
+    /// nonempty cells `p intersect f^-1(i)` in unspecified order.
     ///
     /// When `f` is a predicate, its false values have class 0 and its true
-    /// values have class 1.
+    /// values have class 1. The refinement reuses the allocations in `scratch`
+    /// and replaces any refinement in progress there, so abandoning one needs
+    /// no call.
+    ///
+    /// The caller keeps `f` and `p` referenced until it stops calling
+    /// [`Self::next`] and [`Self::cell`] on `scratch`.
+    fn refine(&self, f: Function, p: Function, scratch: &mut Refine);
+
+    /// The next selected class of the refinement in `scratch`, or `None` once
+    /// every class is yielded.
     ///
     /// Calls `select(i)` at most once per reached class and once for every
-    /// reached class if visitation completes. The selector may run under this
-    /// store's guard. It must not reenter this store, even by dropping a
+    /// reached class before returning `None`. Every call for one refinement
+    /// passes the same selection. The selector may run under this store's
+    /// guard. It must not reenter this store, even by dropping a
     /// [`Self::members`] cursor. Any store it enters must follow this one in a
     /// lock order shared by all threads.
     ///
-    /// Calls `then(i, build)` once per accepted class until the callback
-    /// returns `Break`, which stops visitation and is returned unchanged.
-    /// Each visit runs outside the guard and any retryable attempt. Each
-    /// `build` call returns one owned reference to the cell. Completing
-    /// visitation returns `Continue(())`, including when `p` is empty.
+    /// Returns outside the guard and any retryable attempt, so the caller may
+    /// use this store, including another refinement, before the next call.
+    fn next(&self, scratch: &mut Refine, select: &mut dyn FnMut(u32) -> bool) -> Option<u32>;
+
+    /// The cell of the class most recently yielded by [`Self::next`] on
+    /// `scratch`.
     ///
-    /// The caller keeps `f` and `p` referenced until this returns.
-    #[expect(
-        clippy::type_complexity,
-        reason = "keep the cell builder and continuation signatures explicit"
-    )]
-    fn refine(
-        &self,
-        f: Function,
-        p: Function,
-        scratch: &mut Refine,
-        select: &mut dyn FnMut(u32) -> bool,
-        then: &mut dyn FnMut(u32, &mut dyn FnMut() -> Function) -> ControlFlow<()>,
-    ) -> ControlFlow<()>;
+    /// Each call returns one owned reference. A class whose cell is never
+    /// built costs no construction.
+    fn cell(&self, scratch: &mut Refine) -> Function;
 
     /// Returns a cursor over the members of `p` that owns a root reference
     /// until dropped.

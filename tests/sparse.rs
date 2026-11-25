@@ -4,7 +4,6 @@
 //! check canonical roots and consistency between operations. The fixtures
 //! cover packed, fixed two-word, and runtime-width keys.
 
-use std::ops::ControlFlow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,13 +61,12 @@ fn cells(
     mut select: impl FnMut(u32) -> bool,
 ) -> Vec<(u32, Vec<u64>)> {
     let mut out = Vec::new();
-    let result = alg.refine(f, p, scratch, &mut select, &mut |class, build| {
-        let cell = build();
+    alg.refine(f, p, scratch);
+    while let Some(class) = alg.next(scratch, &mut select) {
+        let cell = alg.cell(scratch);
         out.push((class, members(alg, cell)));
         alg.dec_ref(cell);
-        ControlFlow::Continue(())
-    });
-    assert_eq!(result, ControlFlow::Continue(()));
+    }
     out.sort();
     out
 }
@@ -837,13 +835,13 @@ fn refinement_groups_the_accepted_runs_by_class() {
         cells(&*alg, f, window, &mut scratch, |class| class != 0),
         [(1, vec![10, 30]), (2, vec![20])]
     );
-    // A visitor that breaks stops the walk immediately.
-    let mut count = 0;
-    let stopped = alg.refine(f, p, &mut scratch, &mut |_| true, &mut |_, _| {
-        count += 1;
-        ControlFlow::Break(())
-    });
-    assert!(stopped.is_break() && count == 1);
+    // A refinement abandoned after one class leaves the scratch reusable.
+    alg.refine(f, p, &mut scratch);
+    assert!(alg.next(&mut scratch, &mut |_| true).is_some());
+    assert_eq!(
+        cells(&*alg, f, p, &mut scratch, |_| true),
+        [(0, vec![25]), (1, vec![10, 30]), (2, vec![20])]
+    );
     for f in [f, p, one, window] {
         alg.dec_ref(f);
     }
@@ -932,9 +930,7 @@ fn refinement_with_an_unreferenced_operand_is_rejected() {
         (live, released),
     ] {
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            alg.refine(f, p, &mut Refine::default(), &mut |_| true, &mut |_, _| {
-                ControlFlow::Continue(())
-            })
+            alg.refine(f, p, &mut Refine::default());
         }))
         .unwrap_err();
         assert_eq!(
@@ -995,22 +991,16 @@ fn wide_refinement_distinguishes_an_interval_from_one_point() {
     // The interval [1, 2^64 + 2) reaches the point 2^64 and its complement.
     // Its endpoints look consecutive if the upper words are ignored.
     let mut selected = Vec::new();
-    let flow = alg.refine(
-        f,
-        p,
-        &mut Refine::default(),
-        &mut |_| true,
-        &mut |class, build| {
-            let cell = build();
-            selected.push((
-                class,
-                [alg.evaluate(cell, &[1, 0]), alg.evaluate(cell, &[0, 1])],
-            ));
-            alg.dec_ref(cell);
-            ControlFlow::Continue(())
-        },
-    );
-    assert!(flow.is_continue());
+    let mut scratch = Refine::default();
+    alg.refine(f, p, &mut scratch);
+    while let Some(class) = alg.next(&mut scratch, &mut |_| true) {
+        let cell = alg.cell(&mut scratch);
+        selected.push((
+            class,
+            [alg.evaluate(cell, &[1, 0]), alg.evaluate(cell, &[0, 1])],
+        ));
+        alg.dec_ref(cell);
+    }
     selected.sort_unstable();
     assert_eq!(selected, [(0, [1, 0]), (1, [0, 1])]);
     for root in [lo, hi, p, f] {

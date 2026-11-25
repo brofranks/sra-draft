@@ -5,7 +5,6 @@
 //! same algebra. Logical declarations and rows live above this layer.
 
 use std::fmt;
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use super::{AlgebraId, Context, Predicate};
@@ -337,58 +336,45 @@ impl Residual<'_> {
         self.node.level as usize
     }
 
-    /// Visits the nonempty children satisfying this level's scalar restriction,
-    /// except the one in class `skip`.
+    /// Starts refining the children satisfying this level's scalar
+    /// restriction `p` into `scratch`.
     ///
-    /// Each visit passes the child's class, which identifies it within this
-    /// root, and a builder for its cell. The caller keeps `p` referenced in
-    /// `algebra`. Each build transfers one owned scalar predicate reference.
-    /// A visit borrows its native continuation.
-    /// The index read guard is released before building the cell or calling
-    /// the continuation. Returning `Break` stops the walk.
+    /// The caller keeps `p` referenced in `algebra` until it finishes or
+    /// abandons the refinement, and builds each yielded child's cell with
+    /// [`Algebra::cell`](crate::backend::Algebra::cell).
     ///
     /// # Panics
     ///
     /// Panics on a terminal or when the algebra differs from this level's.
-    pub fn refine<B>(
-        self,
-        algebra: AlgebraId,
-        p: Function,
-        skip: Option<u32>,
-        scratch: &mut Refine,
-        mut then: impl FnMut(u32, &mut dyn FnMut() -> Function, Self) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
+    pub fn refine(self, algebra: AlgebraId, p: Function, scratch: &mut Refine) {
         assert_eq!(
             self.index.algebra(self.level()),
             algebra,
             "query variable uses incompatible algebras"
         );
-        let mut stopped = None;
-        let flow = self.index.cx.resolve(algebra).refine(
-            self.node.partition,
-            p,
-            scratch,
-            &mut |i| i != self.node.hole && Some(i) != skip,
-            &mut |i, build| {
-                let (id, node) = self.index.store.child(self.id, i);
-                then(
-                    i,
-                    build,
-                    Self {
-                        index: self.index,
-                        id,
-                        node,
-                    },
-                )
-                .map_break(|b| stopped = Some(b))
-            },
-        );
-        debug_assert_eq!(
-            flow.is_break(),
-            stopped.is_some(),
-            "backend violated the refinement Break contract"
-        );
-        stopped.map_or(ControlFlow::Continue(()), ControlFlow::Break)
+        self.index
+            .cx
+            .resolve(algebra)
+            .refine(self.node.partition, p, scratch);
+    }
+
+    /// The next nonempty child of the refinement in `scratch`, or `None` once
+    /// it is exhausted.
+    ///
+    /// The index read guard is released before returning, so the caller may
+    /// build the child's cell and explore it before asking for the next one.
+    pub fn next(self, algebra: AlgebraId, scratch: &mut Refine) -> Option<Self> {
+        let i = self
+            .index
+            .cx
+            .resolve(algebra)
+            .next(scratch, &mut |i| i != self.node.hole)?;
+        let (id, node) = self.index.store.child(self.id, i);
+        Some(Self {
+            index: self.index,
+            id,
+            node,
+        })
     }
 }
 

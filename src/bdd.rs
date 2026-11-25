@@ -15,7 +15,6 @@
 use std::array;
 use std::cmp::Ordering;
 use std::mem::{self, MaybeUninit};
-use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use crate::backend::{
@@ -1602,66 +1601,75 @@ impl Algebra for BddAlgebra {
         f
     }
 
-    /// Discovery pauses at each selected class and releases its guard before
-    /// calling `then`. Each `build` call enters the store separately and can
-    /// retry from the original roots after maintenance.
-    fn refine(
-        &self,
-        f: Function,
-        p: Function,
-        scratch: &mut Refine,
-        select: &mut dyn FnMut(u32) -> bool,
-        then: &mut dyn FnMut(u32, &mut dyn FnMut() -> Function) -> ControlFlow<()>,
-    ) -> ControlFlow<()> {
-        if p.is_f() {
-            debug_assert!(
-                self.store.read().has_refs(f),
-                "cannot use an unreferenced BDD node"
-            );
-            return ControlFlow::Continue(());
-        }
-        let Refine {
-            stack, seen, memo, ..
-        } = scratch;
-        stack.clear();
-        stack.push((f, p));
-        seen.clear();
-        loop {
-            let class = 'class: {
+    /// Discovery pauses at each selected class with its pending node pairs in
+    /// `scratch` and releases its guard before returning the class.
+    fn refine(&self, f: Function, p: Function, scratch: &mut Refine) {
+        debug_assert!(
+            {
                 let state = self.store.read();
-                debug_assert!(
-                    state.has_refs(f) && state.has_refs(p),
-                    "cannot use an unreferenced BDD node"
-                );
-                while let Some((l, r)) = stack.pop() {
-                    if r.is_f() {
-                        continue;
-                    }
-                    // Every nonempty predicate reaches true, so a terminal partition side
-                    // has reached its class without walking the rest of `r`.
-                    if let Some(value) = state.node(l).terminal() {
-                        if seen.insert((l, Function::TRUE)) && select(value) {
-                            break 'class value;
-                        }
-                        continue;
-                    }
-                    if !seen.insert((l, r)) {
-                        continue;
-                    }
-                    let start = stack.len();
-                    state.cofactors([l, r], |_, [a, b]| stack.push((a, b)));
-                    // Pop the new pairs in order of first assignment.
-                    stack[start..].reverse();
-                }
-                return ControlFlow::Continue(());
-            };
-            then(class, &mut || {
-                self.store.owned(|state| {
-                    memo.clear();
-                    state.try_cell(memo, f, p, class)
-                })
-            })?;
+                state.has_refs(f) && (p.is_f() || state.has_refs(p))
+            },
+            "cannot use an unreferenced BDD node"
+        );
+        (scratch.f, scratch.p) = (f, p);
+        scratch.stack.clear();
+        if !p.is_f() {
+            scratch.stack.push((f, p));
         }
+        scratch.seen.clear();
+    }
+
+    fn next(&self, scratch: &mut Refine, select: &mut dyn FnMut(u32) -> bool) -> Option<u32> {
+        let Refine {
+            f,
+            p,
+            class,
+            stack,
+            seen,
+            ..
+        } = scratch;
+        if stack.is_empty() {
+            return None;
+        }
+        let state = self.store.read();
+        debug_assert!(
+            state.has_refs(*f) && state.has_refs(*p),
+            "cannot use an unreferenced BDD node"
+        );
+        while let Some((l, r)) = stack.pop() {
+            if r.is_f() {
+                continue;
+            }
+            // Every nonempty predicate reaches true, so a terminal partition side
+            // has reached its class without walking the rest of `r`.
+            if let Some(value) = state.node(l).terminal() {
+                if seen.insert((l, Function::TRUE)) && select(value) {
+                    *class = value;
+                    return Some(value);
+                }
+                continue;
+            }
+            if !seen.insert((l, r)) {
+                continue;
+            }
+            let start = stack.len();
+            state.cofactors([l, r], |_, [a, b]| stack.push((a, b)));
+            // Pop the new pairs in order of first assignment.
+            stack[start..].reverse();
+        }
+        None
+    }
+
+    /// Each build enters the store separately and can retry from the original
+    /// roots after maintenance.
+    fn cell(&self, scratch: &mut Refine) -> Function {
+        let Refine {
+            f, p, class, memo, ..
+        } = scratch;
+        self.store.owned(|state| {
+            memo.clear();
+            state.try_cell(memo, *f, *p, *class)
+        })
     }
 
     fn members(&self, p: Function) -> Box<dyn Cursor + '_> {

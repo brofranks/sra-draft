@@ -110,11 +110,11 @@ pub struct Run<'c> {
     pub equations: Vec<Equation>,
     /// Cell roots replaced by the narrowings in progress, restored on return.
     undo: Vec<(usize, Function)>,
-    /// The refinement buffer.
+    /// Idle refinement buffers.
     ///
-    /// Each refinement completes before its cells are explored, so one buffer
-    /// serves every level and sibling call.
-    refine: Refine,
+    /// A level keeps its refinement suspended while its children run, so each
+    /// open level takes one buffer and returns it when the level closes.
+    refine: Vec<Refine>,
 }
 
 impl<'c> Run<'c> {
@@ -128,7 +128,7 @@ impl<'c> Run<'c> {
             maps: (0..slots.len()).collect(),
             equations: Vec::new(),
             undo: Vec::new(),
-            refine: Refine::default(),
+            refine: Vec::new(),
         };
         eval.extend(slots);
         eval
@@ -519,12 +519,11 @@ impl Exec for () {
 /// accepting branch.
 ///
 /// Each level keeps a heap frame rather than a native one, so the stack depth
-/// stays independent of the row width. A level explores its first refinement
-/// cell before building the others, so an early exit builds one cell per level.
-/// Returning to the level collects the remaining cells in one further
-/// refinement, and a break releases the cells still unexplored.
+/// stays independent of the row width. A level suspends its refinement while
+/// a child is explored and resumes it only when the child continues, so it
+/// builds one cell per explored child and nothing for siblings after a break.
 /// The invocation retains its native source root throughout the walk, so
-/// every collected child stays reachable.
+/// every yielded child stays reachable.
 fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
     root: Residual<'_>,
     cells: Range<usize>,
@@ -538,74 +537,14 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         cell: usize,
         level: usize,
         state: M::Level,
-        /// The refinement in progress, or `None` for a skipped level.
-        sum: Option<Sum<'a, M>>,
+        root: Residual<'a>,
+        /// The suspended refinement and the sum over the explored cells, or
+        /// `None` for a skipped level.
+        sum: Option<(Refine, M::Sum)>,
         /// The undo mark of the cell being explored.
         mark: usize,
     }
-    /// The refinement of one level in progress.
-    struct Sum<'a, M: Mode> {
-        /// The sum over the explored cells.
-        sum: M::Sum,
-        /// The position of this level's first cell in `Held`.
-        start: usize,
-        /// The root and first class of the cells still to collect.
-        rest: Option<(Residual<'a>, u32)>,
-    }
-    /// Refinement cells still to explore, each frame's in reverse order above
-    /// its parent's.
-    struct Held<'a, 'c> {
-        cx: &'c Context,
-        cells: Vec<(AlgebraId, Function, Residual<'a>)>,
-    }
-    impl Held<'_, '_> {
-        fn release(&mut self, start: usize) {
-            for (algebra, p, _) in self.cells.drain(start..) {
-                self.cx.resolve(algebra).dec_ref(p);
-            }
-        }
-    }
-    impl Drop for Held<'_, '_> {
-        fn drop(&mut self) {
-            self.release(0);
-        }
-    }
-    /// Buffers the refinement cells of `cell` against `root` outside class
-    /// `skip`, or only the first one without `skip`, and returns its class
-    /// when another cell remains.
-    fn fill<'a>(
-        root: Residual<'a>,
-        cell: usize,
-        skip: Option<u32>,
-        eval: &mut Run<'_>,
-        held: &mut Held<'a, '_>,
-    ) -> Option<u32> {
-        let start = held.cells.len();
-        let algebra = eval.cells[cell].algebra;
-        let mut first = None;
-        let more = root.refine(
-            algebra,
-            eval.cells[cell].function,
-            skip,
-            &mut eval.refine,
-            |class, build, child| {
-                if skip.is_none() && first.is_some() {
-                    // A second cell remains for a later refinement.
-                    return ControlFlow::Break(());
-                }
-                held.cells.push((algebra, build(), child));
-                first.get_or_insert(class);
-                ControlFlow::Continue(())
-            },
-        );
-        held.cells[start..].reverse();
-        first.filter(|_| more.is_break())
-    }
     let mut frames: Vec<Frame<'_, M>> = Vec::new();
-    let mut held = Held {
-        cx: eval.cx,
-        cells: Vec::new(),
-    };
     let mut next = Some((root, 0));
     let mut result = None;
     loop {
@@ -628,23 +567,24 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
                         cell,
                         level,
                         state,
+                        root,
                         sum: None,
                         mark: 0,
                     });
                     next = Some((root, level + 1));
                     continue;
                 } else {
-                    let start = held.cells.len();
-                    let rest = fill(root, cell, None, eval, &mut held).map(|class| (root, class));
+                    let mut scratch = eval.refine.pop().unwrap_or_default();
+                    let Cell {
+                        algebra, function, ..
+                    } = eval.cells[cell];
+                    root.refine(algebra, function, &mut scratch);
                     frames.push(Frame {
                         cell,
                         level,
                         state,
-                        sum: Some(Sum {
-                            sum: mode.sum(),
-                            start,
-                            rest,
-                        }),
+                        root,
+                        sum: Some((scratch, mode.sum())),
                         mark: 0,
                     });
                 }
@@ -656,31 +596,25 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         if let Some(flow) = result.take() {
             eval.push_read(frame.cell);
             match (&mut frame.sum, flow) {
-                (Some(Sum { sum, .. }), ControlFlow::Continue(value)) => {
+                (Some((_, sum)), ControlFlow::Continue(value)) => {
                     eval.restore(frame.mark);
                     mode.push(sum, frame.cell, value);
                 }
                 (sum, flow) => {
-                    if let Some(Sum { start, .. }) = sum {
+                    if sum.is_some() {
                         eval.restore(frame.mark);
-                        held.release(*start);
                     }
                     let f = frames.pop().unwrap();
+                    eval.refine.extend(f.sum.map(|(scratch, _)| scratch));
                     result = Some(mode.exit(memo, f.level, f.state, eval, flow));
                     continue;
                 }
             }
         }
-        let Sum { sum, start, rest } = frame.sum.as_mut().unwrap();
-        loop {
-            if held.cells.len() == *start {
-                let Some((root, class)) = rest.take() else {
-                    break;
-                };
-                fill(root, frame.cell, Some(class), eval, &mut held);
-                continue;
-            }
-            let (_, p, child) = held.cells.pop().unwrap();
+        let (scratch, sum) = frame.sum.as_mut().unwrap();
+        let algebra = eval.cells[frame.cell].algebra;
+        while let Some(child) = frame.root.next(algebra, scratch) {
+            let p = eval.cx.resolve(algebra).cell(scratch);
             if let Some(mark) = eval.tighten(frame.cell, p) {
                 frame.mark = mark;
                 debug_assert_eq!(eval.reads.last(), Some(&frame.cell));
@@ -693,7 +627,9 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         }
         if next.is_none() {
             let f = frames.pop().unwrap();
-            let out = mode.finish_sum(f.sum.unwrap().sum);
+            let (scratch, sum) = f.sum.unwrap();
+            eval.refine.push(scratch);
+            let out = mode.finish_sum(sum);
             result = Some(mode.exit(memo, f.level, f.state, eval, ControlFlow::Continue(out)));
         }
     }

@@ -4,7 +4,6 @@
 //! and check that equivalent diagrams have the same root. Small store
 //! capacities force collection and growth at different construction steps.
 
-use std::ops::ControlFlow;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::thread;
@@ -1145,100 +1144,74 @@ fn empty_values_with_a_case_label_are_rejected() {
 // --- refinement ----
 
 #[test]
-fn empty_refinement_continues_without_visiting_a_class() {
+fn empty_refinement_yields_no_class() {
     let alg = bind(&roomy(), BV4);
     let f = residues(&*alg, 3);
-    let result = alg.refine(
-        f,
-        Function::FALSE,
-        &mut Refine::default(),
-        &mut |_| panic!("no class is reached"),
-        &mut |_, _| panic!("no cell is delivered"),
+    let mut scratch = Refine::default();
+    alg.refine(f, Function::FALSE, &mut scratch);
+    assert_eq!(
+        alg.next(&mut scratch, &mut |_| panic!("no class is reached")),
+        None
     );
-    assert_eq!(result, ControlFlow::Continue(()));
     alg.dec_ref(f);
 }
 
 #[test]
-fn refinement_selects_cells_and_reuses_scratch_after_a_break() {
+fn refinement_selects_cells_and_reuses_scratch_after_abandonment() {
     let alg = bind(&roomy(), BV4);
     let f = residues(&*alg, 3);
     let p = alg.set(&[1, 2, 3, 4, 5]);
     let mut scratch = Refine::default();
     let mut cells = Vec::new();
-    let result = alg.refine(
-        f,
-        p,
-        &mut scratch,
-        &mut |class| class != 2,
-        &mut |class, build| {
-            let cell = build();
-            cells.push((class, members(&*alg, cell)));
-            alg.dec_ref(cell);
-            ControlFlow::Continue(())
-        },
-    );
+    alg.refine(f, p, &mut scratch);
+    while let Some(class) = alg.next(&mut scratch, &mut |class| class != 2) {
+        let cell = alg.cell(&mut scratch);
+        cells.push((class, members(&*alg, cell)));
+        alg.dec_ref(cell);
+    }
     cells.sort();
-    assert!(result.is_continue());
     assert_eq!(cells, [(0, vec![3]), (1, vec![1, 4])]);
 
-    // A break stops selection and delivery immediately.
+    // Stopping after one class leaves the rest unselected.
     let mut selected = Vec::new();
-    let mut delivered = Vec::new();
-    let stopped = alg.refine(
-        f,
-        p,
-        &mut scratch,
-        &mut |class| {
-            selected.push(class);
-            true
-        },
-        &mut |class, _| {
-            delivered.push(class);
-            ControlFlow::Break(())
-        },
-    );
-    assert!(stopped.is_break());
-    assert_eq!(selected.len(), 1);
-    assert_eq!(delivered, selected);
-
-    // Visiting without requesting a cell still reports every reached class.
-    delivered.clear();
-    let resumed = alg.refine(f, p, &mut scratch, &mut |_| true, &mut |class, _| {
-        delivered.push(class);
-        ControlFlow::Continue(())
+    alg.refine(f, p, &mut scratch);
+    let first = alg.next(&mut scratch, &mut |class| {
+        selected.push(class);
+        true
     });
-    delivered.sort_unstable();
-    assert!(resumed.is_continue());
-    assert_eq!(delivered, [0, 1, 2]);
+    assert_eq!(selected.len(), 1);
+    assert_eq!(first, selected.first().copied());
+
+    // Advancing without requesting a cell still reports every reached class.
+    let mut reached = Vec::new();
+    alg.refine(f, p, &mut scratch);
+    while let Some(class) = alg.next(&mut scratch, &mut |_| true) {
+        reached.push(class);
+    }
+    reached.sort_unstable();
+    assert_eq!(reached, [0, 1, 2]);
     alg.dec_ref(f);
     alg.dec_ref(p);
 }
 
 #[test]
-fn a_one_class_partition_delivers_the_whole_predicate_only_when_selected() {
+fn a_one_class_partition_yields_the_whole_predicate_only_when_selected() {
     let alg = bind(&roomy(), BV4);
     let p = alg.set(&[1, 3, 7]);
     for accept in [false, true] {
         let mut selected = Vec::new();
         let mut delivered = 0;
-        let result = alg.refine(
-            Function::FALSE,
-            p,
-            &mut Refine::default(),
-            &mut |class| {
-                selected.push(class);
-                accept
-            },
-            &mut |class, build| {
-                let cell = build();
-                assert_eq!((class, cell), (0, p));
-                alg.dec_ref(cell);
-                delivered += 1;
-                ControlFlow::Continue(())
-            },
-        );
-        assert!(result.is_continue());
+        let mut scratch = Refine::default();
+        alg.refine(Function::FALSE, p, &mut scratch);
+        while let Some(class) = alg.next(&mut scratch, &mut |class| {
+            selected.push(class);
+            accept
+        }) {
+            let cell = alg.cell(&mut scratch);
+            assert_eq!((class, cell), (0, p));
+            alg.dec_ref(cell);
+            delivered += 1;
+        }
         assert_eq!(selected, [0]);
         assert_eq!(delivered, usize::from(accept));
     }
@@ -1253,18 +1226,13 @@ fn refinement_cells_match_the_diamond_intersections() {
     let d = diamond(&*alg);
     let p = bit(&*alg, 0x38, 0);
     let mut seen = Vec::new();
-    let _ = alg.refine(
-        d,
-        p,
-        &mut Refine::default(),
-        &mut |_| true,
-        &mut |class, build| {
-            let cell = build();
-            seen.push((class, members(&*alg, cell)));
-            alg.dec_ref(cell);
-            ControlFlow::Continue(())
-        },
-    );
+    let mut scratch = Refine::default();
+    alg.refine(d, p, &mut scratch);
+    while let Some(class) = alg.next(&mut scratch, &mut |_| true) {
+        let cell = alg.cell(&mut scratch);
+        seen.push((class, members(&*alg, cell)));
+        alg.dec_ref(cell);
+    }
     let mut expected = [0, 1, 2].map(|class| (class, Vec::new()));
     for x in (0..1 << 18).filter(|x| x & 0x38 == 0) {
         expected[diamond_case(x) as usize].1.push(x);
@@ -1291,24 +1259,18 @@ fn a_shallow_partition_selects_each_class_once_under_a_deep_predicate() {
     points.dedup();
     let p = set(&*alg, points.iter().copied());
     let (mut selected, mut cells) = (Vec::new(), Vec::new());
-    let result = alg.refine(
-        f,
-        p,
-        &mut Refine::default(),
-        &mut |class| {
-            selected.push(class);
-            true
-        },
-        &mut |class, build| {
-            let cell = build();
-            cells.push((class, members(&*alg, cell)));
-            alg.dec_ref(cell);
-            ControlFlow::Continue(())
-        },
-    );
+    let mut scratch = Refine::default();
+    alg.refine(f, p, &mut scratch);
+    while let Some(class) = alg.next(&mut scratch, &mut |class| {
+        selected.push(class);
+        true
+    }) {
+        let cell = alg.cell(&mut scratch);
+        cells.push((class, members(&*alg, cell)));
+        alg.dec_ref(cell);
+    }
     selected.sort_unstable();
     cells.sort();
-    assert!(result.is_continue());
     assert_eq!(selected, [0, 1]);
     let (high, low): (Vec<u64>, Vec<u64>) = points.into_iter().partition(|x| x >> 17 == 1);
     assert_eq!(cells, [(0, low), (1, high)]);
@@ -1325,9 +1287,7 @@ fn refinement_of_an_unreferenced_partition_is_rejected() {
     let alg = bind(&store, BV4);
     let (f, p) = (residues(&*alg, 3), set(&*alg, [1, 2]));
     alg.dec_ref(f);
-    let _ = alg.refine(f, p, &mut Refine::default(), &mut |_| true, &mut |_, _| {
-        ControlFlow::Continue(())
-    });
+    alg.refine(f, p, &mut Refine::default());
 }
 
 #[test]
@@ -1337,13 +1297,7 @@ fn empty_refinement_of_an_unreferenced_partition_is_rejected() {
     let alg = bind(&roomy(), BV4);
     let f = residues(&*alg, 3);
     alg.dec_ref(f);
-    let _ = alg.refine(
-        f,
-        Function::FALSE,
-        &mut Refine::default(),
-        &mut |_| true,
-        &mut |_, _| ControlFlow::Continue(()),
-    );
+    alg.refine(f, Function::FALSE, &mut Refine::default());
 }
 
 #[test]
@@ -1354,9 +1308,7 @@ fn refinement_by_an_unreferenced_predicate_is_rejected() {
     let alg = bind(&store, BV4);
     let (f, p) = (residues(&*alg, 3), set(&*alg, [1, 2]));
     alg.dec_ref(p);
-    let _ = alg.refine(f, p, &mut Refine::default(), &mut |_| true, &mut |_, _| {
-        ControlFlow::Continue(())
-    });
+    alg.refine(f, p, &mut Refine::default());
 }
 
 // --- member cursors ----
@@ -1501,17 +1453,11 @@ fn wide_partition_products_and_filtered_transfers_fit_a_two_mib_stack() {
         assert_eq!(aligned, partition);
         assert_eq!(pairs, [(0, 0), (1, 1), (1, 0)]);
         let mut cells = Vec::new();
-        let flow = alg.refine(
-            f,
-            p,
-            &mut Refine::default(),
-            &mut |_| true,
-            &mut |class, build| {
-                cells.push((class, build()));
-                ControlFlow::Continue(())
-            },
-        );
-        assert!(flow.is_continue());
+        let mut scratch = Refine::default();
+        alg.refine(f, p, &mut scratch);
+        while let Some(class) = alg.next(&mut scratch, &mut |_| true) {
+            cells.push((class, alg.cell(&mut scratch)));
+        }
         cells.sort_unstable_by_key(|&(class, _)| class);
         assert_eq!(cells, [(0, a), (1, b)]);
         for (_, cell) in cells {

@@ -4,7 +4,6 @@
 //! Internal references belong to the wrapped algebra.
 
 use std::cell::Cell;
-use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
 
 use sra::backend::{Algebra, Align, Backend, BoolOp, Cursor, Function, MapSpec, Refine, Values};
@@ -173,23 +172,20 @@ impl Algebra for Reentrant {
         )
     }
 
-    fn refine(
-        &self,
-        f: Function,
-        p: Function,
-        scratch: &mut Refine,
-        select: &mut dyn FnMut(u32) -> bool,
-        then: &mut dyn FnMut(u32, &mut dyn FnMut() -> Function) -> ControlFlow<()>,
-    ) -> ControlFlow<()> {
+    fn refine(&self, f: Function, p: Function, scratch: &mut Refine) {
         self.calls.lock().unwrap().refine += 1;
-        self.algebra.refine(f, p, scratch, select, &mut |i, build| {
-            then(i, &mut || {
-                if let Some(run) = ON_CELL.take() {
-                    run();
-                }
-                self.own(build())
-            })
-        })
+        self.algebra.refine(f, p, scratch);
+    }
+
+    fn next(&self, scratch: &mut Refine, select: &mut dyn FnMut(u32) -> bool) -> Option<u32> {
+        self.algebra.next(scratch, select)
+    }
+
+    fn cell(&self, scratch: &mut Refine) -> Function {
+        if let Some(run) = ON_CELL.take() {
+            run();
+        }
+        self.own(self.algebra.cell(scratch))
     }
 
     fn members(&self, p: Function) -> Box<dyn Cursor + '_> {

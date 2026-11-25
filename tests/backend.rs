@@ -306,17 +306,16 @@ fn grouping_preserves_selected_classes_and_forgets_declined_ones() {
     assert!(r.group(3, 6, &mut select).unwrap().is_empty());
     assert_eq!(r.group(0, 9, &mut select).unwrap().as_slice(), [8]);
     assert_eq!(r.reached(), 3);
-    assert!(
-        r.selected()
-            .map(|(class, initial, _)| (class, initial))
-            .eq([(0, 5), (3, 6)])
-    );
+    let selected: Vec<_> = (0..3)
+        .map_while(|i| r.selected(i).map(|(class, initial, _)| (class, initial)))
+        .collect();
+    assert_eq!(selected, [(0, 5), (3, 6)]);
 
     // The next call clears the lookup and reuses the existing buffers.
     r.restart();
     assert!(r.group(3, 0, &mut select).unwrap().is_empty());
     assert_eq!(r.reached(), 1);
-    assert_eq!(r.selected().next().map(|(c, p, _)| (c, p)), Some((3, 0)));
+    assert_eq!(r.selected(0).map(|(c, p, _)| (c, p)), Some((3, 0)));
     for class in [0, 2] {
         assert!(r.group(class, 0, &mut |_| true).unwrap().is_empty());
     }
@@ -334,20 +333,20 @@ fn refinement_restart_clears_classes_after_a_selector_panic() {
     // Restart clears every class touched before the selector panicked.
     r.restart();
     assert_eq!(r.reached(), 0);
-    assert!(r.selected().next().is_none());
+    assert!(r.selected(0).is_none());
     let mut asked = Vec::new();
     let mut select = |class| {
         asked.push(class);
         true
     };
     assert!(r.group(1, 7, &mut select).unwrap().is_empty());
-    assert_eq!(r.selected().next().map(|(c, p, _)| (c, p)), Some((1, 7)));
+    assert_eq!(r.selected(0).map(|(c, p, _)| (c, p)), Some((1, 7)));
     assert_eq!(r.reached(), 1);
 
     r.restart();
     assert!(r.group(3, 9, &mut select).unwrap().is_empty());
     assert_eq!(asked, [1, 3]);
-    assert_eq!(r.selected().next().map(|(c, p, _)| (c, p)), Some((3, 9)));
+    assert_eq!(r.selected(0).map(|(c, p, _)| (c, p)), Some((3, 9)));
 }
 
 #[test]

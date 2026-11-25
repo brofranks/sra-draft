@@ -3,7 +3,6 @@
 //! Tiny stores force maintenance on the first publication. Other fixtures
 //! force collection, inspect reclamation, or inject unique-table collisions.
 
-use std::ops::ControlFlow;
 use std::sync::{Arc, Barrier};
 use std::thread;
 
@@ -184,17 +183,13 @@ fn breaking_before_build_leaves_cells_unpublished() {
     // The retained roots and constants fill the node arena. Both cells would
     // require a new node.
     let before = epoch(&store);
-    let stopped = alg.refine(f, p, &mut scratch, &mut |_| true, &mut |_, _| {
-        ControlFlow::Break(())
-    });
-    assert!(stopped.is_break());
+    alg.refine(f, p, &mut scratch);
+    assert!(alg.next(&mut scratch, &mut |_| true).is_some());
     assert_eq!(epoch(&store), before);
 
-    let stopped = alg.refine(f, p, &mut scratch, &mut |_| true, &mut |_, build| {
-        alg.dec_ref(build());
-        ControlFlow::Break(())
-    });
-    assert!(stopped.is_break());
+    alg.refine(f, p, &mut scratch);
+    assert!(alg.next(&mut scratch, &mut |_| true).is_some());
+    alg.dec_ref(alg.cell(&mut scratch));
     assert!(epoch(&store) > before);
     alg.dec_ref(f);
     alg.dec_ref(p);
@@ -207,39 +202,27 @@ fn refinement_delivery_can_collect_and_reenter_the_store() {
     let (f, _) = parts(&*alg, 0, [1, 2, 1, 3]);
     let p = set(&*alg, [10, 20, 25, 30]);
     let mut seen = Vec::new();
-    let result = alg.refine(
-        f,
-        p,
-        &mut Refine::default(),
-        &mut |_| true,
-        &mut |class, build| {
-            collect(&store);
-            let a = build();
-            let b = build();
-            alg.dec_ref(a);
-            collect(&store);
-            let mut nested = Vec::new();
-            let nested_result = alg.refine(
-                f,
-                b,
-                &mut Refine::default(),
-                &mut |_| true,
-                &mut |inner, make| {
-                    let selected = make();
-                    nested.push(inner);
-                    assert_eq!(members(&*alg, selected), members(&*alg, b));
-                    alg.dec_ref(selected);
-                    ControlFlow::Continue(())
-                },
-            );
-            assert!(nested_result.is_continue());
-            assert_eq!(nested, [class]);
-            seen.push((class, members(&*alg, b)));
-            alg.dec_ref(b);
-            ControlFlow::Continue(())
-        },
-    );
-    assert!(result.is_continue());
+    let (mut outer, mut inner) = (Refine::default(), Refine::default());
+    alg.refine(f, p, &mut outer);
+    // The suspended refinement resumes after collection and nested use.
+    while let Some(class) = alg.next(&mut outer, &mut |_| true) {
+        collect(&store);
+        let a = alg.cell(&mut outer);
+        let b = alg.cell(&mut outer);
+        alg.dec_ref(a);
+        collect(&store);
+        let mut nested = Vec::new();
+        alg.refine(f, b, &mut inner);
+        while let Some(i) = alg.next(&mut inner, &mut |_| true) {
+            let selected = alg.cell(&mut inner);
+            nested.push(i);
+            assert_eq!(members(&*alg, selected), members(&*alg, b));
+            alg.dec_ref(selected);
+        }
+        assert_eq!(nested, [class]);
+        seen.push((class, members(&*alg, b)));
+        alg.dec_ref(b);
+    }
     seen.sort();
     assert_eq!(seen, [(0, vec![25]), (1, vec![10, 30]), (2, vec![20])]);
     alg.dec_ref(f);

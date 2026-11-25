@@ -11,7 +11,6 @@
 use std::cmp::Ordering;
 use std::hash::Hash;
 use std::mem;
-use std::ops::ControlFlow;
 use std::slice;
 use std::sync::Arc;
 
@@ -981,186 +980,194 @@ impl<L: Layout> Algebra for SparseAlgebra<L> {
 
     /// Groups accepted runs by partition class.
     ///
-    /// The general sweep calls `select` under the store guard and buffers the
-    /// accepted runs before calling `then`. The guard is released for delivery.
-    /// Cell predicates are built on demand, so `Break` skips later visits and
-    /// their builds.
-    fn refine(
-        &self,
-        f: Function,
-        p: Function,
-        scratch: &mut Refine,
-        select: &mut dyn FnMut(u32) -> bool,
-        then: &mut dyn FnMut(u32, &mut dyn FnMut() -> Function) -> ControlFlow<()>,
-    ) -> ControlFlow<()> {
-        if p.is_f() {
-            debug_assert!(
-                self.store.shared.read(self.store.threads).has_refs(f),
-                "cannot use an unreferenced sparse node"
-            );
-            return ControlFlow::Continue(());
-        }
-        let l = self.l;
-        let state = self.store.shared.read(self.store.threads);
+    /// The general sweep runs on the first [`Algebra::next`], calls `select`
+    /// under the store guard, and buffers the accepted runs before yielding.
+    /// The guard is released before each class is returned. Cell predicates are
+    /// built on demand, so an abandoned refinement skips later builds.
+    fn refine(&self, f: Function, p: Function, scratch: &mut Refine) {
         debug_assert!(
-            state.has_refs(f) && state.has_refs(p),
+            {
+                let state = self.store.shared.read(self.store.threads);
+                state.has_refs(f) && (p.is_f() || state.has_refs(p))
+            },
             "cannot use an unreferenced sparse node"
         );
-        let (a, b) = (state.node(f), state.node(p));
-        let stride = l.stride();
-        // A one-class partition and a single point both give a cell equal to p.
-        // A Boolean map's runs alternate, so two transitions from a false
-        // initial payload bound the entire included run.
-        let single = if f.is_f() {
-            Some(0)
-        } else if b.initial == 0
-            && b.edges.len() == 2 * stride
-            && l.follows(l.key(b.edges), l.key(&b.edges[stride..]))
-        {
-            let i = search(l, a.edges, l.key(b.edges));
-            Some(run_payload(l, a.initial, a.edges, i))
-        } else {
-            None
-        };
-        if let Some(class) = single {
-            drop(state);
-            if !select(class) {
-                return ControlFlow::Continue(());
-            }
-            return then(class, &mut || {
-                self.inc_ref(p);
-                p
-            });
-        }
-        let n = a.edges.len() / stride;
-        // A Boolean map indicates its own class 1. Its unrestricted refinement
-        // uses f and its payload flip directly, avoiding a sweep and re-interning
-        // f. A predicate holding at zero is a Boolean map too, so the class
-        // opposite its initial payload is the second one, and the full
-        // predicate has none.
-        let identity = p.is_t()
-            && a.edges
-                .chunks_exact(stride)
-                .all(|entry| l.payload(entry) <= 1);
-        // The dense lookup grows through the largest class number reached
-        // and retains its length across calls, regardless of transition count.
-        let groups = &mut scratch.groups;
-        groups.restart();
-        let mut holds = b.initial != 0;
-        if holds {
-            groups.group(a.initial, 1, select);
-        }
-        if identity && n != 0 {
-            groups.group(1 - a.initial, 0, select);
-        }
-        // Selection is asked once per class. Declined boundaries are discarded.
-        // Accepted intervals toggle each group at increasing nonzero keys.
-        let mut write = |class, key: L::Key<'_>, value| {
-            if let Some(transitions) = groups.group(class, 0, select) {
-                l.push(transitions, key, value);
-            }
-        };
-        // Bound each accepted interval before visiting its transitions. Galloping
-        // from the previous cursor skips rejected gaps without rescanning them or
-        // charging a comparison against the predicate boundary to every accepted
-        // transition. The layout compares a packed key as an integer without
-        // forming a slice.
-        let cmp = |i: usize, key: L::Key<'_>| l.compare(l.key(&a.edges[i * stride..]), key);
-        let seek = |i: usize, key: L::Key<'_>, order: Ordering| {
-            // The lower bound consumes equal transitions. The upper bound
-            // leaves them out of the accepted interval.
-            let before = |j: usize| cmp(j, key) < order;
-            if i == n || !before(i) {
-                return i;
-            }
-            let (mut lo, hi) = (i + 1, n);
-            // Gallop from the current lower bound to bracket the answer, then
-            // binary-search that bracket. Nearby answers require only a short
-            // doubling scan before the binary search.
-            let (mut step, mut end) = (0, hi);
-            while lo + step < hi {
-                if !before(lo + step) {
-                    end = lo + step;
-                    break;
+        (scratch.f, scratch.p, scratch.position) = (f, p, None);
+    }
+
+    fn next(&self, scratch: &mut Refine, select: &mut dyn FnMut(u32) -> bool) -> Option<u32> {
+        if scratch.position.is_none() {
+            scratch.position = Some(0);
+            let Refine {
+                f,
+                p,
+                identity,
+                groups,
+                ..
+            } = scratch;
+            groups.restart();
+            *identity = false;
+            'sweep: {
+                if p.is_f() {
+                    break 'sweep;
                 }
-                lo += step + 1;
-                step = step * 2 + 1;
-            }
-            while lo < end {
-                let mid = lo + (end - lo) / 2;
-                if before(mid) {
-                    lo = mid + 1;
+                let l = self.l;
+                let state = self.store.shared.read(self.store.threads);
+                let (a, b) = (state.node(*f), state.node(*p));
+                let stride = l.stride();
+                // A one-class partition and a single point both give a cell equal to p.
+                // A Boolean map's runs alternate, so two transitions from a false
+                // initial payload bound the entire included run.
+                let single = if f.is_f() {
+                    Some(0)
+                } else if b.initial == 0
+                    && b.edges.len() == 2 * stride
+                    && l.follows(l.key(b.edges), l.key(&b.edges[stride..]))
+                {
+                    let i = search(l, a.edges, l.key(b.edges));
+                    Some(run_payload(l, a.initial, a.edges, i))
                 } else {
-                    end = mid;
+                    None
+                };
+                if let Some(class) = single {
+                    drop(state);
+                    groups.group(class, 0, select);
+                    break 'sweep;
                 }
-            }
-            lo
-        };
-        let mut i = 0;
-        // None denotes the initial/final universe boundary without an encoded
-        // zero allocation.
-        let mut sweep = |lo: Option<L::Key<'_>>, hi: Option<L::Key<'_>>| {
-            if let Some(lo) = lo {
-                i = seek(i, lo, Ordering::Greater);
-            }
-            let end = hi.map_or(n, |hi| seek(i, hi, Ordering::Equal));
-            let mut class = run_payload(l, a.initial, a.edges, i);
-            if let Some(lo) = lo {
-                write(class, lo, 1);
-            }
-            for entry in a.edges[i * stride..end * stride].chunks_exact(stride) {
-                let key = l.key(entry);
-                write(class, key, 0);
-                class = l.payload(entry);
-                write(class, key, 1);
-            }
-            i = end;
-            if let Some(key) = hi {
-                write(class, key, 0);
-            }
-        };
-        if !identity {
-            let mut lo = None;
-            for (key, value) in entries(l, &b) {
+                let n = a.edges.len() / stride;
+                // A Boolean map indicates its own class 1. Its unrestricted refinement
+                // uses f and its payload flip directly, avoiding a sweep and re-interning
+                // f. A predicate holding at zero is a Boolean map too, so the class
+                // opposite its initial payload is the second one, and the full
+                // predicate has none.
+                *identity = p.is_t()
+                    && a.edges
+                        .chunks_exact(stride)
+                        .all(|entry| l.payload(entry) <= 1);
+                // The dense lookup grows through the largest class number reached
+                // and retains its length across calls, regardless of transition count.
+                let mut holds = b.initial != 0;
                 if holds {
-                    sweep(lo, Some(key));
+                    groups.group(a.initial, 1, select);
                 }
-                lo = Some(key);
-                holds = value != 0;
-            }
-            if holds {
-                sweep(lo, None);
-            }
-        }
-        drop(state);
-        // If the predicate reaches one class, it is that class's cell.
-        let single = groups.reached() == 1;
-        for (class, initial, transitions) in groups.selected() {
-            then(class, &mut || {
-                if single {
-                    self.inc_ref(p);
-                    return p;
+                if *identity && n != 0 {
+                    groups.group(1 - a.initial, 0, select);
                 }
-                if identity && class == 1 {
-                    self.inc_ref(f);
-                    return f;
-                }
-                self.store.shared.retry(self.store.threads, |state| {
-                    if identity {
-                        // Flip the payloads of `f` under the guard that interns them,
-                        // so a relocation between attempts rereads the relocated
-                        // edges.
-                        let node = state.node(f);
-                        transitions.clear();
-                        for entry in node.edges.chunks_exact(stride) {
-                            l.push(transitions, l.key(entry), 1 - l.payload(entry));
+                // Selection is asked once per class. Declined boundaries are discarded.
+                // Accepted intervals toggle each group at increasing nonzero keys.
+                let mut write = |class, key: L::Key<'_>, value| {
+                    if let Some(transitions) = groups.group(class, 0, select) {
+                        l.push(transitions, key, value);
+                    }
+                };
+                // Bound each accepted interval before visiting its transitions. Galloping
+                // from the previous cursor skips rejected gaps without rescanning them or
+                // charging a comparison against the predicate boundary to every accepted
+                // transition. The layout compares a packed key as an integer without
+                // forming a slice.
+                let cmp = |i: usize, key: L::Key<'_>| l.compare(l.key(&a.edges[i * stride..]), key);
+                let seek = |i: usize, key: L::Key<'_>, order: Ordering| {
+                    // The lower bound consumes equal transitions. The upper bound
+                    // leaves them out of the accepted interval.
+                    let before = |j: usize| cmp(j, key) < order;
+                    if i == n || !before(i) {
+                        return i;
+                    }
+                    let (mut lo, hi) = (i + 1, n);
+                    // Gallop from the current lower bound to bracket the answer, then
+                    // binary-search that bracket. Nearby answers require only a short
+                    // doubling scan before the binary search.
+                    let (mut step, mut end) = (0, hi);
+                    while lo + step < hi {
+                        if !before(lo + step) {
+                            end = lo + step;
+                            break;
+                        }
+                        lo += step + 1;
+                        step = step * 2 + 1;
+                    }
+                    while lo < end {
+                        let mid = lo + (end - lo) / 2;
+                        if before(mid) {
+                            lo = mid + 1;
+                        } else {
+                            end = mid;
                         }
                     }
-                    state.intern_referenced(initial, transitions)
-                })
-            })?;
+                    lo
+                };
+                let mut i = 0;
+                // None denotes the initial/final universe boundary without an encoded
+                // zero allocation.
+                let mut sweep = |lo: Option<L::Key<'_>>, hi: Option<L::Key<'_>>| {
+                    if let Some(lo) = lo {
+                        i = seek(i, lo, Ordering::Greater);
+                    }
+                    let end = hi.map_or(n, |hi| seek(i, hi, Ordering::Equal));
+                    let mut class = run_payload(l, a.initial, a.edges, i);
+                    if let Some(lo) = lo {
+                        write(class, lo, 1);
+                    }
+                    for entry in a.edges[i * stride..end * stride].chunks_exact(stride) {
+                        let key = l.key(entry);
+                        write(class, key, 0);
+                        class = l.payload(entry);
+                        write(class, key, 1);
+                    }
+                    i = end;
+                    if let Some(key) = hi {
+                        write(class, key, 0);
+                    }
+                };
+                if !*identity {
+                    let mut lo = None;
+                    for (key, value) in entries(l, &b) {
+                        if holds {
+                            sweep(lo, Some(key));
+                        }
+                        lo = Some(key);
+                        holds = value != 0;
+                    }
+                    if holds {
+                        sweep(lo, None);
+                    }
+                }
+            }
         }
-        ControlFlow::Continue(())
+        let i = scratch.position.unwrap();
+        let (class, ..) = scratch.groups.selected(i)?;
+        (scratch.class, scratch.position) = (class, Some(i + 1));
+        Some(class)
+    }
+
+    fn cell(&self, scratch: &mut Refine) -> Function {
+        let l = self.l;
+        let (f, p, identity) = (scratch.f, scratch.p, scratch.identity);
+        // If the predicate reaches one class, it is that class's cell.
+        let single = scratch.groups.reached() == 1;
+        let i = scratch.position.unwrap() - 1;
+        let (class, initial, transitions) = scratch.groups.selected(i).unwrap();
+        if single {
+            self.inc_ref(p);
+            return p;
+        }
+        if identity && class == 1 {
+            self.inc_ref(f);
+            return f;
+        }
+        self.store.shared.retry(self.store.threads, |state| {
+            if identity {
+                // Flip the payloads of `f` under the guard that interns them,
+                // so a relocation between attempts rereads the relocated
+                // edges.
+                let node = state.node(f);
+                transitions.clear();
+                for entry in node.edges.chunks_exact(l.stride()) {
+                    l.push(transitions, l.key(entry), 1 - l.payload(entry));
+                }
+            }
+            state.intern_referenced(initial, transitions)
+        })
     }
 
     /// A cursor over the members of `p`, holding its own reference to the root

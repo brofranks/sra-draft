@@ -5,7 +5,6 @@
 //! roots survive.
 
 use std::collections::HashSet;
-use std::ops::ControlFlow;
 use std::panic::{self, AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Barrier};
 use std::thread;
@@ -797,21 +796,14 @@ fn building_a_refinement_cell_retries_after_maintenance() {
     let alg = bind(&store, BV12);
     let f = residues(&*alg, 3);
     let p = alg.set(&[1, 2, 3, 4, 5]);
-    let result = alg.refine(
-        f,
-        p,
-        &mut Refine::default(),
-        &mut |class| class == 0,
-        &mut |_, build| {
-            let before = epoch(&store);
-            let cell = build();
-            assert!(epoch(&store) > before);
-            assert_eq!(members(&*alg, cell), [3]);
-            alg.dec_ref(cell);
-            ControlFlow::Break(())
-        },
-    );
-    assert!(result.is_break());
+    let mut scratch = Refine::default();
+    alg.refine(f, p, &mut scratch);
+    assert_eq!(alg.next(&mut scratch, &mut |class| class == 0), Some(0));
+    let before = epoch(&store);
+    let cell = alg.cell(&mut scratch);
+    assert!(epoch(&store) > before);
+    assert_eq!(members(&*alg, cell), [3]);
+    alg.dec_ref(cell);
     alg.dec_ref(f);
     alg.dec_ref(p);
 }
@@ -823,23 +815,17 @@ fn repeated_cell_builds_own_independent_references() {
     let f = residues(&*alg, 3);
     let p = alg.set(&[1, 2, 3, 4, 5]);
     let mut cells = Vec::new();
-    let result = alg.refine(
-        f,
-        p,
-        &mut Refine::default(),
-        &mut |_| true,
-        &mut |class, build| {
-            let a = build();
-            let b = build();
-            alg.dec_ref(a);
-            collect(&store);
-            cells.push((class, members(&*alg, b)));
-            alg.dec_ref(b);
-            ControlFlow::Continue(())
-        },
-    );
+    let mut scratch = Refine::default();
+    alg.refine(f, p, &mut scratch);
+    while let Some(class) = alg.next(&mut scratch, &mut |_| true) {
+        let a = alg.cell(&mut scratch);
+        let b = alg.cell(&mut scratch);
+        alg.dec_ref(a);
+        collect(&store);
+        cells.push((class, members(&*alg, b)));
+        alg.dec_ref(b);
+    }
     cells.sort();
-    assert!(result.is_continue());
     assert_eq!(cells, [(0, vec![3]), (1, vec![1, 4]), (2, vec![2, 5])]);
     alg.dec_ref(f);
     alg.dec_ref(p);
@@ -852,36 +838,25 @@ fn refinement_delivery_can_collect_and_reenter_the_store() {
     let f = residues(&*alg, 3);
     let p = set(&*alg, [1, 2, 3, 4, 5]);
     let mut seen = Vec::new();
-    let result = alg.refine(
-        f,
-        p,
-        &mut Refine::default(),
-        &mut |_| true,
-        &mut |class, build| {
-            collect(&store);
-            let cell = build();
-            let mut nested = Vec::new();
-            let nested_result = alg.refine(
-                f,
-                cell,
-                &mut Refine::default(),
-                &mut |_| true,
-                &mut |inner, make| {
-                    let selected = make();
-                    nested.push(inner);
-                    assert_eq!(members(&*alg, selected), members(&*alg, cell));
-                    alg.dec_ref(selected);
-                    ControlFlow::Continue(())
-                },
-            );
-            assert!(nested_result.is_continue());
-            assert_eq!(nested, [class]);
-            seen.push((class, members(&*alg, cell)));
-            alg.dec_ref(cell);
-            ControlFlow::Continue(())
-        },
-    );
-    assert!(result.is_continue());
+    let (mut outer, mut inner) = (Refine::default(), Refine::default());
+    alg.refine(f, p, &mut outer);
+    // The suspended refinement resumes after collection and nested use.
+    while let Some(class) = alg.next(&mut outer, &mut |_| true) {
+        collect(&store);
+        let cell = alg.cell(&mut outer);
+        let mut nested = Vec::new();
+        alg.refine(f, cell, &mut inner);
+        while let Some(i) = alg.next(&mut inner, &mut |_| true) {
+            let selected = alg.cell(&mut inner);
+            nested.push(i);
+            assert_eq!(members(&*alg, selected), members(&*alg, cell));
+            alg.dec_ref(selected);
+        }
+        assert_eq!(nested, [class]);
+        seen.push((class, members(&*alg, cell)));
+        alg.dec_ref(cell);
+        collect(&store);
+    }
     seen.sort();
     assert_eq!(seen, [(0, vec![3]), (1, vec![1, 4]), (2, vec![2, 5])]);
     alg.dec_ref(f);
