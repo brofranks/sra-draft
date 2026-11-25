@@ -110,11 +110,14 @@ pub struct Run<'c> {
     pub equations: Vec<Equation>,
     /// Cell roots replaced by the narrowings in progress, restored on return.
     undo: Vec<(usize, Function)>,
-    /// Idle refinement buffers.
+    /// Refinement buffers, used as a stack by open levels.
     ///
     /// A level keeps its refinement suspended while its children run, so each
-    /// open level takes one buffer and returns it when the level closes.
+    /// open level owns the buffer at its slot until it closes. Buffers stay in
+    /// place and keep their allocations across levels.
     refine: Vec<Refine>,
+    /// The number of buffers in `refine` owned by open levels.
+    open: usize,
 }
 
 impl<'c> Run<'c> {
@@ -129,6 +132,7 @@ impl<'c> Run<'c> {
             equations: Vec::new(),
             undo: Vec::new(),
             refine: Vec::new(),
+            open: 0,
         };
         eval.extend(slots);
         eval
@@ -538,9 +542,10 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         level: usize,
         state: M::Level,
         root: Residual<'a>,
-        /// The suspended refinement and the sum over the explored cells, or
-        /// `None` for a skipped level.
-        sum: Option<(Refine, M::Sum)>,
+        /// The sum over the explored cells, or `None` for a skipped level.
+        sum: Option<M::Sum>,
+        /// The slot of this level's suspended refinement in `Run::refine`.
+        slot: usize,
         /// The undo mark of the cell being explored.
         mark: usize,
     }
@@ -569,22 +574,28 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
                         state,
                         root,
                         sum: None,
+                        slot: 0,
                         mark: 0,
                     });
                     next = Some((root, level + 1));
                     continue;
                 } else {
-                    let mut scratch = eval.refine.pop().unwrap_or_default();
+                    let slot = eval.open;
+                    if slot == eval.refine.len() {
+                        eval.refine.push(Refine::default());
+                    }
+                    eval.open += 1;
                     let Cell {
                         algebra, function, ..
                     } = eval.cells[cell];
-                    root.refine(algebra, function, &mut scratch);
+                    root.refine(algebra, function, &mut eval.refine[slot]);
                     frames.push(Frame {
                         cell,
                         level,
                         state,
                         root,
-                        sum: Some((scratch, mode.sum())),
+                        sum: Some(mode.sum()),
+                        slot,
                         mark: 0,
                     });
                 }
@@ -596,25 +607,29 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         if let Some(flow) = result.take() {
             eval.push_read(frame.cell);
             match (&mut frame.sum, flow) {
-                (Some((_, sum)), ControlFlow::Continue(value)) => {
+                (Some(sum), ControlFlow::Continue(value)) => {
                     eval.restore(frame.mark);
                     mode.push(sum, frame.cell, value);
                 }
                 (sum, flow) => {
                     if sum.is_some() {
                         eval.restore(frame.mark);
+                        eval.open -= 1;
                     }
                     let f = frames.pop().unwrap();
-                    eval.refine.extend(f.sum.map(|(scratch, _)| scratch));
                     result = Some(mode.exit(memo, f.level, f.state, eval, flow));
                     continue;
                 }
             }
         }
-        let (scratch, sum) = frame.sum.as_mut().unwrap();
+        let sum = frame.sum.as_mut().unwrap();
         let cx = eval.cx;
         let algebra = cx.resolve(eval.cells[frame.cell].algebra);
-        while let Some(child) = frame.root.next(algebra, scratch) {
+        loop {
+            let scratch = &mut eval.refine[frame.slot];
+            let Some(child) = frame.root.next(algebra, scratch) else {
+                break;
+            };
             let p = algebra.cell(scratch);
             if let Some(mark) = eval.tighten(frame.cell, p) {
                 frame.mark = mark;
@@ -628,9 +643,8 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         }
         if next.is_none() {
             let f = frames.pop().unwrap();
-            let (scratch, sum) = f.sum.unwrap();
-            eval.refine.push(scratch);
-            let out = mode.finish_sum(sum);
+            eval.open -= 1;
+            let out = mode.finish_sum(f.sum.unwrap());
             result = Some(mode.exit(memo, f.level, f.state, eval, ControlFlow::Continue(out)));
         }
     }
