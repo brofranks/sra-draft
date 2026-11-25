@@ -420,9 +420,9 @@ impl<N> NodeSlot<N> {
     /// The `step` callback returns the new state, or `None` to reject it.
     #[inline(always)]
     fn transition(&self, step: impl Fn(u32) -> Option<u32>, rejected: &str) {
-        self.state
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, step)
-            .expect(rejected);
+        // Scratch ablation: single-threaded, no RMW.
+        let next = step(self.state.load(Ordering::Relaxed)).expect(rejected);
+        self.state.store(next, Ordering::Relaxed);
     }
 
     /// Pins an unreferenced or already pinned node.
@@ -1581,7 +1581,7 @@ impl<S: Debug> Debug for Read<'_, S> {
 impl<S> Drop for Read<'_, S> {
     #[inline(always)]
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::Release);
+        self.counter.store(self.counter.load(Ordering::Relaxed) - 1, Ordering::Relaxed);
     }
 }
 
@@ -1708,10 +1708,9 @@ impl<S: Grow> Shared<S> {
             // increment against the request and the writer's drain check against each
             // other, so either this attempt sees the request or the writer sees this
             // reader.
-            counter
-                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1))
-                .expect("reader count overflow");
-            if self.requested.load(Ordering::SeqCst) == 0 {
+            // Scratch ablation: single-threaded admission without RMW or fences.
+            counter.store(counter.load(Ordering::Relaxed) + 1, Ordering::Relaxed);
+            if self.requested.load(Ordering::Relaxed) == 0 {
                 return Read {
                     store: self.store.get(),
                     counter,
