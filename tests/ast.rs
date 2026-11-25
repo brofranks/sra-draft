@@ -393,13 +393,15 @@ fn declarations_survive_store_growth() {
 fn concurrent_interning_shares_declarations() {
     let cx = Context::empty();
     let sorts = cx.sorts();
+    // Four workers cross the initial 256-node capacity even under Miri.
+    let widths = if cfg!(miri) { 257 } else { 599 };
     let barrier = Barrier::new(4);
     let results = thread::scope(|s| {
         let workers: Vec<_> = (0..4)
             .map(|_| {
                 s.spawn(|| {
                     barrier.wait();
-                    (1..600).map(|w| sorts.bv(w)).collect::<Vec<_>>()
+                    (1..=widths).map(|w| sorts.bv(w)).collect::<Vec<_>>()
                 })
             })
             .collect();
@@ -409,7 +411,7 @@ fn concurrent_interning_shares_declarations() {
             .collect::<Vec<_>>()
     });
     assert!(results.iter().all(|r| *r == results[0]));
-    assert_eq!(sorts.bv(599), results[0][598]);
+    assert_eq!(results[0].last(), Some(&sorts.bv(widths)));
 }
 
 #[test]
