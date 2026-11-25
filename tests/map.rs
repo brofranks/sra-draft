@@ -118,7 +118,8 @@ fn rust_map_on_a_symbolic_column_is_rejected() {
     let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let t = cx.sorts().record("T", &[("x", four.sort())]);
-    cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    let column = cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    fixture::indexes(&cx, column);
     Row::bind(&mut cx, t);
     let mut s = Rel::new_set(&cx, cx.sorts().project(t, 0));
     s.insert(1_u8);

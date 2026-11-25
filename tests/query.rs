@@ -25,6 +25,17 @@ fn relation(cx: &Context, four: &Row, ps: impl IntoIterator<Item = (u8, u8)>) ->
     r
 }
 
+/// A binary relation with a small index over its two scalar endpoints.
+fn binary(cx: &Context, domain: &Row, range: &Row) -> Rel {
+    sra::index::Index::with_capacity(
+        cx,
+        &[domain.scalar_algebra(), range.scalar_algebra()],
+        32,
+        64,
+    );
+    Rel::new(cx, domain, range)
+}
+
 /// The values of a set over one column.
 fn values(rel: &Rel) -> BTreeSet<u64> {
     rows(rel)
@@ -153,7 +164,7 @@ fn union_with_mismatched_domains_is_rejected() {
 fn union_with_mismatched_ranges_is_rejected() {
     let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    relation(&cx, &four, [(1, 2)]).union(&Rel::new(&cx, four.clone(), eight));
+    relation(&cx, &four, [(1, 2)]).union(&binary(&cx, &four, &eight));
 }
 
 #[test]
@@ -172,7 +183,8 @@ fn equating_stored_columns_with_different_storage_is_rejected() {
     let t = cx
         .sorts()
         .record("T", &[("x", four.sort()), ("y", four.sort())]);
-    cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    let column = cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    fixture::indexes(&cx, column);
     Row::bind(&mut cx, t);
     Rel::new_set(&cx, cx.sorts().project(t, 0)).union(&Rel::new_set(&cx, cx.sorts().project(t, 1)));
 }
@@ -206,7 +218,7 @@ fn intersection_with_mismatched_domains_is_rejected() {
 fn intersection_with_mismatched_ranges_is_rejected() {
     let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    relation(&cx, &four, [(1, 2)]).intersection(&Rel::new(&cx, four.clone(), eight));
+    relation(&cx, &four, [(1, 2)]).intersection(&binary(&cx, &four, &eight));
 }
 
 #[test]
@@ -274,7 +286,7 @@ fn inverse_swaps_endpoints_and_composition_chains_them() {
 fn composition_through_a_mismatched_endpoint_is_rejected() {
     let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    relation(&cx, &four, [(1, 2)]).select(&Rel::new(&cx, eight, four.clone()));
+    relation(&cx, &four, [(1, 2)]).select(&binary(&cx, &eight, &four));
 }
 
 // --- declarations and records ---------------------------------------------
@@ -282,44 +294,44 @@ fn composition_through_a_mismatched_endpoint_is_rejected() {
 #[test]
 fn declarations_project_and_construct_records() {
     let mut cx = tiny();
-    let four = bv(&mut cx, 4);
+    let two = bv(&mut cx, 2);
     let t = cx
         .sorts()
-        .record("T", &[("x", four.sort()), ("y", four.sort())]);
+        .record("T", &[("x", two.sort()), ("y", two.sort())]);
     let trow = Row::bind(&mut cx, t);
-    let args_sort = cx.sorts().product([four.sort(), four.sort()]);
+    let args_sort = cx.sorts().product([two.sort(), two.sort()]);
     let args_row = Row::bind(&mut cx, args_sort);
     let (x, y) = (cx.sorts().project(t, 0), cx.sorts().project(t, 1));
     let mut r = Rel::new_set(&cx, trow.clone());
-    r.insert_rows([(1_u8, 2_u8), (3, 4)]);
+    r.insert_rows([(1_u8, 2_u8), (3, 0)]);
     assert_eq!(
         rows(&r.select(x).collect()),
-        [[1, 2, 1], [3, 4, 3]].map(Vec::from).into()
+        [[1, 2, 1], [3, 0, 3]].map(Vec::from).into()
     );
     assert_eq!(
         rows(&r.select(y).collect()),
-        [[1, 2, 2], [3, 4, 4]].map(Vec::from).into()
+        [[1, 2, 2], [3, 0, 0]].map(Vec::from).into()
     );
     let swapped = r.select(Query::decl(&cx, y).and(x)).collect();
     assert_eq!(swapped.count(), 2);
     assert!(swapped.root().contains(&[1, 2, 2, 1]));
-    assert!(swapped.root().contains(&[3, 4, 4, 3]));
+    assert!(swapped.root().contains(&[3, 0, 0, 3]));
     // A constructor keeps every column under the record sort; applying it
     // to an argument relation yields the records, and the constructor alone
     // is the identity between them.
     let mut args = Rel::new_set(&cx, args_row);
-    args.insert_rows([(5_u8, 6_u8)]);
+    args.insert_rows([(2_u8, 3_u8)]);
     let made = cx.sorts().constructor(t).apply(&args).collect();
-    assert!(made.contains(((5_u8, 6_u8), (5_u8, 6_u8))));
+    assert!(made.contains(((2_u8, 3_u8), (2_u8, 3_u8))));
     assert_eq!(made.range().sort(), t);
     let c = Query::decl(&cx, cx.sorts().constructor(t));
     assert_eq!((c.domain.sort(), c.range.sort()), (args.domain().sort(), t));
-    assert_eq!(c.count().to_string(), "256");
+    assert_eq!(c.count().to_string(), "16");
     assert_eq!(
         Query::decl(&cx, cx.sorts().project(t, 1))
             .count()
             .to_string(),
-        "256"
+        "16"
     );
     // Coercion swaps a record for its argument product without touching
     // cells.
@@ -335,6 +347,7 @@ fn a_constructor_reads_the_record_fields_from_their_bound_algebras() {
     let t = cx.sorts().record("T", &[("left", two), ("right", two)]);
     cx.bind_field(cx.sorts().project(t, 0), "bdd");
     let record = Row::bind(&mut cx, t);
+    sra::index::Index::with_capacity(&cx, &record.algebras().repeat(2), 32, 64);
     let query = Query::decl(&cx, cx.sorts().constructor(t));
     assert_eq!(query.domain.algebras(), record.algebras());
     assert_eq!(query.range.algebras(), record.algebras());
@@ -475,7 +488,7 @@ fn minus_subtracts_keys_and_pairs() {
     );
     // The right range is hidden: a relation with another range sort still
     // keys the domain.
-    let mut other = Rel::new(&cx, four.clone(), eight);
+    let mut other = binary(&cx, &four, &eight);
     other.insert((3_u8, 200_u8));
     assert_eq!(pairs(&r.minus(&other).collect()), [(1, 2), (2, 3)].into());
     // Plain pair difference keys the complete pair and keeps the endpoints.
@@ -582,7 +595,7 @@ fn symmetric_difference_with_mismatched_domains_is_rejected() {
 fn symmetric_difference_with_mismatched_ranges_is_rejected() {
     let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    let _ = relation(&cx, &four, [(1, 2)]) == Rel::new(&cx, four.clone(), eight);
+    let _ = relation(&cx, &four, [(1, 2)]) == binary(&cx, &four, &eight);
 }
 
 // --- terminals ------------------------------------------------------------

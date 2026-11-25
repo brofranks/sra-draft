@@ -16,7 +16,7 @@ pub fn tiny() -> Context {
 
 /// Registers the homogeneous layouts used by the query fixtures.
 pub fn indexes(cx: &Context, algebra: AlgebraId) {
-    let columns = [algebra; 4];
+    let columns = [algebra; 5];
     for n in 1..=columns.len() {
         Index::with_capacity(cx, &columns[..n], 32, 64);
     }
