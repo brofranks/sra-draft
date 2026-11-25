@@ -683,11 +683,9 @@ impl Exec for IndexRoot {
         // Scratch: an index whose levels all share one packed sparse column
         // walks with that table statically dispatched.
         let index = self.index();
-        let first = index.algebra(0);
         let cx = eval.cx;
-        let packed = (0..arity)
-            .all(|i| index.algebra(i) == first)
-            .then(|| cx.resolve(first).as_packed())
+        let packed = (arity > 0 && (0..arity).all(|i| index.algebra(i) == index.algebra(0)))
+            .then(|| cx.resolve(index.algebra(0)).as_packed())
             .flatten();
         let cells = map.start..map.start + stop;
         let result = match packed {
