@@ -354,7 +354,8 @@ impl<'c> Run<'c> {
     ///
     /// # Panics
     ///
-    /// Panics if the equation closes a cycle among the active equations.
+    /// Panics if the equation closes a cycle, its endpoints use different
+    /// algebras, or the backend does not support the map.
     #[inline(always)]
     pub fn equate<M: Mode>(
         &mut self,
@@ -527,34 +528,43 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
     let Some(pos) = cells.next() else {
         return then(eval, mode);
     };
-    mode.level(memo, root.key(), level, eval, |eval, mode, memo| {
-        let cell = eval.maps[pos];
-        if root.level() > level {
-            // A skipped source level admits the full field universe and can
-            // adopt the other source's algebra.
-            return eval.read(cell, |eval| {
-                walk(root, level + 1, cells, eval, memo, mode, then)
-            });
-        }
-        let mut out = mode.sum();
-        let mut scratch = eval.refinements.pop().unwrap_or_default();
-        let flow = root.refine(
-            eval.cells[cell].algebra,
-            eval.cells[cell].function,
-            &mut scratch,
-            |p, child| {
-                let result = eval.narrow(cell, p, mode, |eval, mode| {
-                    eval.read(cell, |eval| {
-                        walk(child, level + 1, cells.clone(), eval, memo, mode, then)
-                    })
+    let descend = || {
+        mode.level(memo, root.key(), level, eval, |eval, mode, memo| {
+            let cell = eval.maps[pos];
+            if root.level() > level {
+                // A skipped source level admits the full field universe and can
+                // adopt the other source's algebra.
+                return eval.read(cell, |eval| {
+                    walk(root, level + 1, cells, eval, memo, mode, then)
                 });
-                mode.push(&mut out, cell, result?);
-                ControlFlow::Continue(())
-            },
-        );
-        eval.refinements.push(scratch);
-        flow.map_continue(|()| mode.finish_sum(out))
-    })
+            }
+            let mut out = mode.sum();
+            let mut scratch = eval.refinements.pop().unwrap_or_default();
+            let flow = root.refine(
+                eval.cells[cell].algebra,
+                eval.cells[cell].function,
+                &mut scratch,
+                |p, child| {
+                    let result = eval.narrow(cell, p, mode, |eval, mode| {
+                        eval.read(cell, |eval| {
+                            walk(child, level + 1, cells.clone(), eval, memo, mode, then)
+                        })
+                    });
+                    mode.push(&mut out, cell, result?);
+                    ControlFlow::Continue(())
+                },
+            );
+            eval.refinements.push(scratch);
+            flow.map_continue(|()| mode.finish_sum(out))
+        })
+    };
+    // A refinement lends its continuation to the backend. Keep those calls
+    // nested so a break stops even the first unfinished refinement.
+    if level != 0 && level.is_multiple_of(8) {
+        stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, descend)
+    } else {
+        descend()
+    }
 }
 
 /// A stored source leaf.
@@ -579,18 +589,20 @@ impl Exec for IndexRoot {
         }
         let arity = self.index().arity();
         debug_assert_eq!(map.len(), arity);
+        if map
+            .clone()
+            .any(|i| eval.cells[eval.maps[i]].function.is_f())
+        {
+            return ControlFlow::Continue(mode.identity());
+        }
         for i in map.clone().rev() {
             eval.push_read(eval.maps[i]);
         }
         let stop = (0..arity)
             .rposition(|i| {
                 let cell = eval.maps[map.start + i];
-                let own = (i..arity)
-                    .filter(|&j| eval.maps[map.start + j] == cell)
-                    .count();
-                eval.cells[cell].reads != own
-                    || !eval.cells[cell].function.is_t()
-                    || mode.needs(cell)
+                // A repeated cell stops the scan at its last occurrence.
+                eval.cells[cell].reads != 1 || !eval.cells[cell].function.is_t() || mode.needs(cell)
             })
             .map_or(0, |i| i + 1);
         let result = walk(
@@ -763,7 +775,8 @@ pub struct Sum {
 
 /// The root holding `child` where coordinate `level` satisfies `p`.
 ///
-/// Boolean multiplication handles authored field reordering. The ordinary increasing-level case attaches directly to the shared child,
+/// Boolean multiplication handles authored field reordering. The ordinary
+/// increasing-level case attaches directly to the shared child,
 /// retaining the existing index's partition/child algebra.
 fn attach(index: &Index, level: usize, p: &Predicate, child: &IndexRoot) -> IndexRoot {
     if child.residual().level() > level {
@@ -866,7 +879,10 @@ impl Collect {
                     }
                     diagonal.push(branch);
                 }
-                diagonal.finish(self.output.empty())
+                diagonal
+                    .drain()
+                    .reduce(|a, b| a.apply(BoolOp::Or, &b))
+                    .unwrap_or_else(|| self.output.empty())
             }
         }
     }
@@ -901,9 +917,9 @@ impl Mode for Collect {
     #[inline(always)]
     fn finish_sum(&mut self, mut sum: Self::Sum) -> IndexRoot {
         let out = match sum.cases.len() {
-            0 => self.output.empty(),
+            0 => None,
             // A lone case already owns exactly the node we would rebuild.
-            1 => sum.cases.pop().unwrap().0,
+            1 => Some(sum.cases.pop().unwrap().0),
             _ => {
                 let cases: Vec<_> = sum.cases.iter().map(|(_, p, child)| (p, child)).collect();
                 let out = self.output.cases(sum.level, &self.output.empty(), &cases);
@@ -921,10 +937,14 @@ impl Mode for Collect {
                     );
                 }
                 sum.cases.clear();
-                out
+                Some(out)
             }
         };
-        let out = sum.rest.finish(out);
+        let out = out
+            .into_iter()
+            .chain(sum.rest.drain())
+            .reduce(|a, b| a.apply(BoolOp::Or, &b))
+            .unwrap_or_else(|| self.output.empty());
         self.sums.push(sum);
         out
     }

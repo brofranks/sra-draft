@@ -5,6 +5,11 @@
 //! operand. Local fixtures bind bit-vector rows, build sets, and list ground
 //! pairs.
 
+#[path = "support/query.rs"]
+mod fixture;
+
+use fixture::{bv, tiny};
+
 use std::collections::BTreeSet;
 
 use sra::context::Context;
@@ -15,12 +20,6 @@ use sra::row::Row;
 
 fn image(s: &Rel, m: impl Operand) -> BTreeSet<(u64, u64)> {
     pairs(&s.select(m).collect())
-}
-
-/// A bound row of the bit-vector sort of width `w`.
-fn bv(cx: &mut Context, w: u32) -> Row {
-    let sort = cx.sorts().bv(w);
-    Row::bind(cx, sort)
 }
 
 /// A 4-bit set holding `values`, over the already bound row `four`.
@@ -65,7 +64,7 @@ fn pairs(rel: &Rel) -> BTreeSet<(u64, u64)> {
 
 #[test]
 fn bit_maps_relate_each_input_to_its_image() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let s = set(&cx, &four, [1, 2, 3]);
     assert_eq!(image(&s, map::copy()), [(1, 1), (2, 2), (3, 3)].into());
@@ -73,8 +72,11 @@ fn bit_maps_relate_each_input_to_its_image() {
     assert_eq!(image(&s, map::bvand(2_u8)), [(1, 0), (2, 2), (3, 2)].into());
     assert_eq!(image(&s, map::bvxor(1_u8)), [(1, 0), (2, 3), (3, 2)].into());
     assert_eq!(
-        image(&s, map::assign(0b1100_u8, 0b0100_u8)),
-        [(1, 5), (2, 6), (3, 7)].into()
+        image(
+            &set(&cx, &four, [1, 2, 3, 9]),
+            map::assign(0b1100_u8, 0b0100_u8)
+        ),
+        [(1, 5), (2, 6), (3, 7), (9, 5)].into()
     );
     // A partial Rust function drops inputs without an image.
     assert_eq!(
@@ -103,7 +105,7 @@ fn bit_maps_relate_each_input_to_its_image() {
 #[test]
 #[should_panic(expected = "assigned value has bits outside its mask")]
 fn assigned_value_outside_its_mask_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     set(&cx, &four, [1]).select(map::assign(0b1100_u8, 0b0001_u8));
 }
@@ -113,10 +115,11 @@ fn assigned_value_outside_its_mask_is_rejected() {
 #[test]
 #[should_panic(expected = "a BDD store cannot apply a Rust map")]
 fn rust_map_on_a_symbolic_column_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let t = cx.sorts().record("T", &[("x", four.sort())]);
-    cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    let column = cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    fixture::indexes(&cx, column);
     Row::bind(&mut cx, t);
     let mut s = Rel::new_set(&cx, cx.sorts().project(t, 0));
     s.insert(1_u8);
@@ -132,7 +135,7 @@ fn rust_map_on_a_symbolic_column_is_rejected() {
 #[test]
 #[should_panic(expected = "equations between cells must not form a cycle")]
 fn equating_map_endpoints_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     // x -> (x, x ^ 1), then restricting the pair to the diagonal equates the
     // map's two cells.

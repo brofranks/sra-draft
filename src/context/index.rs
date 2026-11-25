@@ -414,16 +414,8 @@ impl BalancedUnion {
         self.0.push(Some(root));
     }
 
-    /// Unions the pending branches with `out` and clears the buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if roots combined by this union belong to different indexes.
-    pub fn finish(&mut self, out: IndexRoot) -> IndexRoot {
-        self.0
-            .drain(..)
-            .rev()
-            .flatten()
-            .fold(out, |a, b| a.apply(BoolOp::Or, &b))
+    /// Drains the pending branches from largest group to smallest.
+    pub fn drain(&mut self) -> impl Iterator<Item = IndexRoot> + '_ {
+        self.0.drain(..).rev().flatten()
     }
 }

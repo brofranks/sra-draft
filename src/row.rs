@@ -64,10 +64,10 @@ impl Leaves {
         )
     }
 
-    fn next(&mut self, sorts: &Sorts) -> Option<(ScalarSort, Option<FuncDecl>)> {
+    fn next(&mut self, sorts: &Sorts) -> Option<(Sort, Option<FuncDecl>)> {
         while let Some((part, field)) = self.first.take().or_else(|| self.stack.pop()) {
-            if let SortKind::Scalar(scalar) = part.kind() {
-                return Some((scalar, field));
+            if matches!(part.kind(), SortKind::Scalar(_)) {
+                return Some((part, field));
             }
             if part.scalar_len() == 0 {
                 continue;
@@ -97,6 +97,12 @@ pub struct Row {
 }
 
 impl Row {
+    /// The logical scalar sorts in physical column order.
+    pub fn leaf_sorts<'a>(&self, cx: &'a Context) -> impl Iterator<Item = Sort> + 'a {
+        let (_, mut leaves) = Leaves::new(cx.sorts(), self.sort.into());
+        iter::from_fn(move || leaves.next(cx.sorts()).map(|(sort, _)| sort))
+    }
+
     /// A row over the slice of `layout` starting at `start`.
     ///
     /// Each algebra must have the exact scalar sort at its position. The
@@ -123,7 +129,7 @@ impl Row {
                 .expect("row sort must supply every scalar leaf");
             assert_eq!(
                 cx.resolve(id).sort(),
-                scalar,
+                scalar.scalar(),
                 "row algebra must match its logical scalar sort"
             );
         }
@@ -164,7 +170,7 @@ impl Row {
                     Some(accessor) => cx
                         .field(accessor)
                         .unwrap_or_else(|| cx.bind_field(accessor, DEFAULT_BACKEND)),
-                    None => cx.bind(DEFAULT_BACKEND, scalar),
+                    None => cx.bind(DEFAULT_BACKEND, scalar.scalar()),
                 })
             }),
         )
@@ -183,7 +189,7 @@ impl Row {
             iter::from_fn(|| leaves.next(cx.sorts())).map(|(scalar, field)| {
                 match field {
                     Some(accessor) => cx.field(accessor),
-                    None => cx.algebra(DEFAULT_BACKEND, scalar),
+                    None => cx.algebra(DEFAULT_BACKEND, scalar.scalar()),
                 }
                 .expect("row field must be bound")
             }),

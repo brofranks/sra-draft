@@ -5,6 +5,11 @@
 //! pairs, and `values` reads the values of a one-column set. Local fixtures
 //! bind bit-vector rows, build sets, and list ground pairs and rows.
 
+#[path = "support/query.rs"]
+mod fixture;
+
+use fixture::{bv, tiny};
+
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 
@@ -20,6 +25,17 @@ fn relation(cx: &Context, four: &Row, ps: impl IntoIterator<Item = (u8, u8)>) ->
     r
 }
 
+/// A binary relation with a small index over its two scalar endpoints.
+fn binary(cx: &Context, domain: &Row, range: &Row) -> Rel {
+    sra::index::Index::with_capacity(
+        cx,
+        &[domain.scalar_algebra(), range.scalar_algebra()],
+        32,
+        64,
+    );
+    Rel::new(cx, domain, range)
+}
+
 /// The values of a set over one column.
 fn values(rel: &Rel) -> BTreeSet<u64> {
     rows(rel)
@@ -29,12 +45,6 @@ fn values(rel: &Rel) -> BTreeSet<u64> {
             r[0]
         })
         .collect()
-}
-
-/// A bound row of the bit-vector sort of width `w`.
-fn bv(cx: &mut Context, w: u32) -> Row {
-    let sort = cx.sorts().bv(w);
-    Row::bind(cx, sort)
 }
 
 /// A 4-bit set holding `values`, over the already bound row `four`.
@@ -79,7 +89,7 @@ fn pairs(rel: &Rel) -> BTreeSet<(u64, u64)> {
 
 #[test]
 fn union_merges_sets_and_relations() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let (s, t) = (set(&cx, &four, [1, 2, 3]), set(&cx, &four, [2, 3, 4]));
     assert_eq!(values(&s.union(&t).collect()), [1, 2, 3, 4].into());
@@ -104,14 +114,14 @@ fn union_merges_sets_and_relations() {
 
 #[test]
 fn union_branches_restore_equalities_between_shared_cells() {
-    let mut cx = Context::default();
-    let four = bv(&mut cx, 4);
+    let mut cx = tiny();
+    let two = bv(&mut cx, 2);
     // Left: x -> (x, x) over a set, three exposed positions on one cell.
     // Right: d -> (r, r) over a relation. The union exposes three cells; the
     // left branch equates them on entry.
-    let s = set(&cx, &four, [1, 2, 3]);
-    let r = relation(&cx, &four, [(1, 2), (2, 3), (3, 1)]);
-    let q = Query::id(&cx, four);
+    let s = set(&cx, &two, [1, 2, 3]);
+    let r = relation(&cx, &two, [(1, 2), (2, 3), (3, 1)]);
+    let q = Query::id(&cx, two);
     let diag = q.clone().and(q);
     let u = id().and(&s).union((&r).select(&diag));
     assert_eq!(
@@ -144,7 +154,7 @@ fn union_branches_restore_equalities_between_shared_cells() {
 #[test]
 #[should_panic(expected = "union requires compatible query endpoints")]
 fn union_with_mismatched_domains_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
     set(&cx, &four, [1]).union(&Rel::new_set(&cx, eight));
 }
@@ -152,15 +162,15 @@ fn union_with_mismatched_domains_is_rejected() {
 #[test]
 #[should_panic(expected = "union requires compatible query endpoints")]
 fn union_with_mismatched_ranges_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    relation(&cx, &four, [(1, 2)]).union(&Rel::new(&cx, four.clone(), eight));
+    relation(&cx, &four, [(1, 2)]).union(&binary(&cx, &four, &eight));
 }
 
 #[test]
 #[should_panic(expected = "query operands belong to different contexts")]
 fn mixing_operands_from_two_contexts_is_rejected() {
-    let (mut cx, mut other) = (Context::default(), Context::default());
+    let (mut cx, mut other) = (tiny(), tiny());
     let (four, four2) = (bv(&mut cx, 4), bv(&mut other, 4));
     set(&cx, &four, [1]).union(&set(&other, &four2, [1]));
 }
@@ -168,12 +178,13 @@ fn mixing_operands_from_two_contexts_is_rejected() {
 #[test]
 #[should_panic(expected = "query variable uses incompatible algebras")]
 fn equating_stored_columns_with_different_storage_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let t = cx
         .sorts()
         .record("T", &[("x", four.sort()), ("y", four.sort())]);
-    cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    let column = cx.bind_field(cx.sorts().project(t, 0), "bdd");
+    fixture::indexes(&cx, column);
     Row::bind(&mut cx, t);
     Rel::new_set(&cx, cx.sorts().project(t, 0)).union(&Rel::new_set(&cx, cx.sorts().project(t, 1)));
 }
@@ -182,7 +193,7 @@ fn equating_stored_columns_with_different_storage_is_rejected() {
 
 #[test]
 fn intersection_keeps_shared_pairs() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let (s, t) = (set(&cx, &four, [1, 2, 3]), set(&cx, &four, [2, 3, 4]));
     assert_eq!(values(&s.intersection(&t).collect()), [2, 3].into());
@@ -197,7 +208,7 @@ fn intersection_keeps_shared_pairs() {
 #[test]
 #[should_panic(expected = "intersection requires compatible query endpoints")]
 fn intersection_with_mismatched_domains_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
     set(&cx, &four, [1]).intersection(&Rel::new_set(&cx, eight));
 }
@@ -205,14 +216,14 @@ fn intersection_with_mismatched_domains_is_rejected() {
 #[test]
 #[should_panic(expected = "intersection requires compatible query endpoints")]
 fn intersection_with_mismatched_ranges_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    relation(&cx, &four, [(1, 2)]).intersection(&Rel::new(&cx, four.clone(), eight));
+    relation(&cx, &four, [(1, 2)]).intersection(&binary(&cx, &four, &eight));
 }
 
 #[test]
 fn complement_uses_the_exact_universe() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, one) = (bv(&mut cx, 4), bv(&mut cx, 1));
     let s = set(&cx, &four, [1, 2, 3]);
     assert_eq!(
@@ -249,7 +260,7 @@ fn complement_uses_the_exact_universe() {
 
 #[test]
 fn inverse_swaps_endpoints_and_composition_chains_them() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let r = relation(&cx, &four, [(1, 2), (2, 3)]);
     assert_eq!(pairs(&r.inv().collect()), [(2, 1), (3, 2)].into());
@@ -273,54 +284,54 @@ fn inverse_swaps_endpoints_and_composition_chains_them() {
 #[test]
 #[should_panic(expected = "composition requires compatible whole endpoint sorts")]
 fn composition_through_a_mismatched_endpoint_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    relation(&cx, &four, [(1, 2)]).select(&Rel::new(&cx, eight, four.clone()));
+    relation(&cx, &four, [(1, 2)]).select(&binary(&cx, &eight, &four));
 }
 
 // --- declarations and records ---------------------------------------------
 
 #[test]
 fn declarations_project_and_construct_records() {
-    let mut cx = Context::default();
-    let four = bv(&mut cx, 4);
+    let mut cx = tiny();
+    let two = bv(&mut cx, 2);
     let t = cx
         .sorts()
-        .record("T", &[("x", four.sort()), ("y", four.sort())]);
+        .record("T", &[("x", two.sort()), ("y", two.sort())]);
     let trow = Row::bind(&mut cx, t);
-    let args_sort = cx.sorts().product([four.sort(), four.sort()]);
+    let args_sort = cx.sorts().product([two.sort(), two.sort()]);
     let args_row = Row::bind(&mut cx, args_sort);
     let (x, y) = (cx.sorts().project(t, 0), cx.sorts().project(t, 1));
     let mut r = Rel::new_set(&cx, trow.clone());
-    r.insert_rows([(1_u8, 2_u8), (3, 4)]);
+    r.insert_rows([(1_u8, 2_u8), (3, 0)]);
     assert_eq!(
         rows(&r.select(x).collect()),
-        [[1, 2, 1], [3, 4, 3]].map(Vec::from).into()
+        [[1, 2, 1], [3, 0, 3]].map(Vec::from).into()
     );
     assert_eq!(
         rows(&r.select(y).collect()),
-        [[1, 2, 2], [3, 4, 4]].map(Vec::from).into()
+        [[1, 2, 2], [3, 0, 0]].map(Vec::from).into()
     );
-    assert_eq!(
-        rows(&r.select(Query::decl(&cx, y).and(x)).collect()),
-        [[1, 2, 2, 1], [3, 4, 4, 3]].map(Vec::from).into()
-    );
+    let swapped = r.select(Query::decl(&cx, y).and(x)).collect();
+    assert_eq!(swapped.count(), 2);
+    assert!(swapped.root().contains(&[1, 2, 2, 1]));
+    assert!(swapped.root().contains(&[3, 0, 0, 3]));
     // A constructor keeps every column under the record sort; applying it
     // to an argument relation yields the records, and the constructor alone
     // is the identity between them.
     let mut args = Rel::new_set(&cx, args_row);
-    args.insert_rows([(5_u8, 6_u8)]);
+    args.insert_rows([(2_u8, 3_u8)]);
     let made = cx.sorts().constructor(t).apply(&args).collect();
-    assert!(made.contains(((5_u8, 6_u8), (5_u8, 6_u8))));
+    assert!(made.contains(((2_u8, 3_u8), (2_u8, 3_u8))));
     assert_eq!(made.range().sort(), t);
     let c = Query::decl(&cx, cx.sorts().constructor(t));
     assert_eq!((c.domain.sort(), c.range.sort()), (args.domain().sort(), t));
-    assert_eq!(c.count().to_string(), "256");
+    assert_eq!(c.count().to_string(), "16");
     assert_eq!(
         Query::decl(&cx, cx.sorts().project(t, 1))
             .count()
             .to_string(),
-        "256"
+        "16"
     );
     // Coercion swaps a record for its argument product without touching
     // cells.
@@ -331,11 +342,12 @@ fn declarations_project_and_construct_records() {
 
 #[test]
 fn a_constructor_reads_the_record_fields_from_their_bound_algebras() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let two = cx.sorts().bv(2);
     let t = cx.sorts().record("T", &[("left", two), ("right", two)]);
     cx.bind_field(cx.sorts().project(t, 0), "bdd");
     let record = Row::bind(&mut cx, t);
+    sra::index::Index::with_capacity(&cx, &record.algebras().repeat(2), 32, 64);
     let query = Query::decl(&cx, cx.sorts().constructor(t));
     assert_eq!(query.domain.algebras(), record.algebras());
     assert_eq!(query.range.algebras(), record.algebras());
@@ -347,7 +359,7 @@ fn a_constructor_reads_the_record_fields_from_their_bound_algebras() {
 
 #[test]
 fn except_projects_a_record_onto_its_other_members() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let two = bv(&mut cx, 2);
     let t = cx.sorts().record(
         "T",
@@ -368,14 +380,11 @@ fn except_projects_a_record_onto_its_other_members() {
     );
     // The projection is exactly the pairing of the kept members' accessors.
     let kept = Query::decl(&cx, cx.sorts().project(t, 0)).and(cx.sorts().project(t, 2));
-    assert_eq!(
-        rows(&r.select(dropped.clone()).collect()),
-        rows(&r.select(kept).collect())
-    );
-    assert_eq!(
-        rows(&r.select(dropped).collect()),
-        [[0, 1, 2, 0, 2], [1, 2, 3, 1, 3]].map(Vec::from).into()
-    );
+    for out in [r.select(dropped).collect(), r.select(kept).collect()] {
+        assert_eq!(out.count(), 2);
+        assert!(out.root().contains(&[0, 1, 2, 0, 2]));
+        assert!(out.root().contains(&[1, 2, 3, 1, 3]));
+    }
     // Dropping one member of a two-member record leaves a one-member
     // product.
     assert_eq!(
@@ -387,7 +396,7 @@ fn except_projects_a_record_onto_its_other_members() {
 #[test]
 #[should_panic(expected = "member index exceeds the record")]
 fn except_with_an_out_of_range_member_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let two = bv(&mut cx, 2);
     let t = cx
         .sorts()
@@ -400,7 +409,7 @@ fn except_with_an_out_of_range_member_is_rejected() {
 
 #[test]
 fn keys_and_values_are_the_witnessed_endpoint_subidentities() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     // Both are subidentities, so collecting one stores a set over that
     // endpoint.
@@ -430,11 +439,13 @@ fn keys_and_values_are_the_witnessed_endpoint_subidentities() {
 #[test]
 fn subtraction_keeps_equations_live_while_narrowing_keys() {
     for backend in ["sparse", "bdd"] {
-        let mut cx = Context::default();
+        let mut cx = tiny();
         let sort = cx.sorts().bv(2);
         let column = cx.bind(backend, sort.scalar());
+        fixture::indexes(&cx, column);
         let row = Row::new(&cx, sort, [column].into(), 0);
-        for mask in 0..16_u8 {
+        // Under Miri, cover empty, alternating, and full exclusions.
+        for mask in (0..16_u8).step_by(if cfg!(miri) { 5 } else { 1 }) {
             let excluded = set(&cx, &row, (0..4_u8).filter(|&x| mask & (1 << x) != 0));
             let query = Query::id(&cx, row.clone())
                 .select(sra::map::copy())
@@ -466,7 +477,7 @@ fn subtraction_keeps_equations_live_while_narrowing_keys() {
 
 #[test]
 fn minus_subtracts_keys_and_pairs() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
     let r = relation(&cx, &four, [(1, 2), (2, 3), (3, 4)]);
     assert_eq!(
@@ -475,7 +486,7 @@ fn minus_subtracts_keys_and_pairs() {
     );
     // The right range is hidden: a relation with another range sort still
     // keys the domain.
-    let mut other = Rel::new(&cx, four.clone(), eight);
+    let mut other = binary(&cx, &four, &eight);
     other.insert((3_u8, 200_u8));
     assert_eq!(pairs(&r.minus(&other).collect()), [(1, 2), (2, 3)].into());
     // Plain pair difference keys the complete pair and keeps the endpoints.
@@ -488,7 +499,7 @@ fn minus_subtracts_keys_and_pairs() {
 #[test]
 #[should_panic(expected = "minus requires compatible whole domain sorts")]
 fn minus_with_mismatched_domains_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
     relation(&cx, &four, [(1, 2)]).minus(&Rel::new_set(&cx, eight));
 }
@@ -497,21 +508,21 @@ fn minus_with_mismatched_domains_is_rejected() {
 
 #[test]
 fn pairing_and_restriction_share_the_domain() {
-    let mut cx = Context::default();
-    let four = bv(&mut cx, 4);
-    let r = relation(&cx, &four, [(1, 2), (2, 3)]);
-    let r2 = relation(&cx, &four, [(1, 5), (1, 6), (3, 7)]);
+    let mut cx = tiny();
+    let three = bv(&mut cx, 3);
+    let r = relation(&cx, &three, [(1, 2), (2, 3)]);
+    let r2 = relation(&cx, &three, [(1, 5), (1, 6), (3, 7)]);
     assert_eq!(
         rows(&r.and(&r2).collect()),
         [[1, 2, 5], [1, 2, 6]].map(Vec::from).into()
     );
     assert_eq!(
-        pairs(&r.with(&set(&cx, &four, [3])).collect()),
+        pairs(&r.with(&set(&cx, &three, [3])).collect()),
         [(2, 3)].into()
     );
     assert_eq!(pairs(&r.with(&r2.inv()).collect()), BTreeSet::new());
     assert_eq!(
-        pairs(&r.with(&relation(&cx, &four, [(3, 0)])).collect()),
+        pairs(&r.with(&relation(&cx, &three, [(3, 0)])).collect()),
         [(2, 3)].into()
     );
     // `id().and` keeps identity-first order, and an identity paired with
@@ -525,7 +536,7 @@ fn pairing_and_restriction_share_the_domain() {
 #[test]
 #[should_panic(expected = "pairing requires compatible whole domain sorts")]
 fn pairing_with_mismatched_domains_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
     relation(&cx, &four, [(1, 2)]).and(&Rel::new_set(&cx, eight));
 }
@@ -533,7 +544,7 @@ fn pairing_with_mismatched_domains_is_rejected() {
 #[test]
 #[should_panic(expected = "restriction requires compatible whole endpoint sorts")]
 fn restriction_by_a_mismatched_range_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
     relation(&cx, &four, [(1, 2)]).with(&Rel::new_set(&cx, eight));
 }
@@ -542,7 +553,7 @@ fn restriction_by_a_mismatched_range_is_rejected() {
 
 #[test]
 fn semantic_equality_compares_complete_pairs() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let pair_sort = cx.sorts().product([four.sort(), four.sort()]);
     let pair = Row::bind(&mut cx, pair_sort);
@@ -572,7 +583,7 @@ fn semantic_equality_compares_complete_pairs() {
 #[test]
 #[should_panic(expected = "difference requires compatible query endpoints")]
 fn symmetric_difference_with_mismatched_domains_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
     let _ = set(&cx, &four, [1]) == Rel::new_set(&cx, eight);
 }
@@ -580,16 +591,16 @@ fn symmetric_difference_with_mismatched_domains_is_rejected() {
 #[test]
 #[should_panic(expected = "difference requires compatible query endpoints")]
 fn symmetric_difference_with_mismatched_ranges_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let (four, eight) = (bv(&mut cx, 4), bv(&mut cx, 8));
-    let _ = relation(&cx, &four, [(1, 2)]) == Rel::new(&cx, four.clone(), eight);
+    let _ = relation(&cx, &four, [(1, 2)]) == binary(&cx, &four, &eight);
 }
 
 // --- terminals ------------------------------------------------------------
 
 #[test]
 fn terminals_count_visit_and_collect() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let r = relation(&cx, &four, [(1, 2), (2, 3), (2, 4)]);
     let q = (&r).into_query();
@@ -643,7 +654,7 @@ fn terminals_count_visit_and_collect() {
 
 #[test]
 fn identity_carries_its_context() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let two = bv(&mut cx, 2);
     let t = cx.sorts().record("T", &[("x", two.sort())]);
     let trow = Row::bind(&mut cx, t);
@@ -660,7 +671,7 @@ fn zero_field_queries_preserve_declared_universes_and_argument_shapes() {
 
     use sra::rel::Universe;
 
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let empty = cx.sorts().record("Empty", &[]);
     let record = Row::bind(&mut cx, empty);
     let unit = Row::of(&cx, cx.sorts().unit());
@@ -708,11 +719,12 @@ fn binary_universes_survive_aliases_and_mixed_set_operations() {
     use sra::rel::Universe;
 
     for backend in ["sparse", "bdd"] {
-        let mut cx = Context::default();
+        let mut cx = tiny();
         let t = cx.sorts().record("T", &[("value", cx.sorts().bv(2))]);
         cx.bind_field(cx.sorts().project(t, 0), backend);
         let field = cx.sorts().project(t, 0);
         let two = Row::bind(&mut cx, field);
+        fixture::indexes(&cx, two.scalar_algebra());
         let r = Rel::new(&cx, two.clone(), two.clone()).not();
         let s = set(&cx, &two, [0, 2]);
         let diag = r.intersection(&s);
@@ -768,7 +780,7 @@ fn binary_universes_survive_aliases_and_mixed_set_operations() {
 fn nominal_coercion_and_structural_maps_keep_declared_products() {
     use sra::rel::Universe;
 
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let two = bv(&mut cx, 2);
     let t = cx.sorts().record("T", &[("x", two.sort())]);
     let record = Row::bind(&mut cx, t);
@@ -799,7 +811,7 @@ fn nominal_coercion_and_structural_maps_keep_declared_products() {
 
 #[test]
 fn projection_positions_preserve_repeated_coordinates() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let bit = bv(&mut cx, 1);
     let range = Row::product(&cx, &[&bit, &bit]);
     let query = query::project(&cx, &bit, [0, 0], range);
@@ -812,7 +824,7 @@ fn projection_positions_preserve_repeated_coordinates() {
 
 #[test]
 fn projection_positions_follow_the_actual_input_order() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let bit = bv(&mut cx, 1);
     let pair = Row::product(&cx, &[&bit, &bit]);
     let inverse = query::project(&cx, &pair, [1, 0], pair.clone()).inv();
@@ -842,7 +854,7 @@ fn projection_positions_follow_the_actual_input_order() {
 #[test]
 #[should_panic(expected = "positions require a source-free projection")]
 fn positions_of_an_inverse_duplication_are_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let bit = bv(&mut cx, 1);
     query::project(&cx, &bit, [0, 0], Row::product(&cx, &[&bit, &bit]))
         .inv()
@@ -852,7 +864,7 @@ fn positions_of_an_inverse_duplication_are_rejected() {
 #[test]
 #[should_panic(expected = "positions require a projection of the complete input")]
 fn positions_of_an_inverse_partial_projection_are_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let bit = bv(&mut cx, 1);
     let pair = Row::product(&cx, &[&bit, &bit]);
     query::project(&cx, &pair, [0], bit).inv().positions();
@@ -861,7 +873,7 @@ fn positions_of_an_inverse_partial_projection_are_rejected() {
 #[test]
 #[should_panic(expected = "one projection position per range column")]
 fn projection_with_surplus_positions_is_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let bit = bv(&mut cx, 1);
     query::project(&cx, &bit, [0, 0], bit.clone());
 }
@@ -869,7 +881,7 @@ fn projection_with_surplus_positions_is_rejected() {
 #[test]
 #[should_panic(expected = "positions require a source-free projection")]
 fn positions_of_a_zero_column_filter_are_rejected() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let bit = bv(&mut cx, 1);
     let unit = Row::of(&cx, cx.sorts().unit());
     let empty = Rel::new_set(&cx, unit.clone());
@@ -878,4 +890,56 @@ fn positions_of_a_zero_column_filter_are_rejected() {
     assert!(query.is_empty());
     assert!(query.slots.iter().all(|slot| !slot.read));
     query.positions();
+}
+
+#[test]
+#[should_panic(expected = "projection must preserve logical scalar sorts")]
+fn projection_preserves_symbol_namespaces() {
+    let mut cx = tiny();
+    let x = cx.sorts().symbol("X");
+    let y = cx.sorts().symbol("Y");
+    let a = Row::bind(&mut cx, x);
+    let b = Row::bind(&mut cx, y);
+    assert_eq!(query::project(&cx, &a, [0], a.clone()).positions(), [0]);
+    query::project(&cx, &a, [0], b);
+}
+
+#[test]
+fn wide_sources_reach_the_first_callback_on_a_small_stack() {
+    for (levels, constrained) in [(16_384, false), (4_096, true)] {
+        let levels = if cfg!(miri) { 4 } else { levels };
+        let mut cx = tiny();
+        let sort = cx
+            .sorts()
+            .product(std::iter::repeat_n(cx.sorts().bool(), levels));
+        let row = Row::bind(&mut cx, sort);
+        let a = row.algebras()[0];
+        sra::index::Index::with_capacity(&cx, row.algebras(), 32, 64);
+        let p = if constrained {
+            cx.set(a, &[1])
+        } else {
+            cx.t(a)
+        };
+        let mut rel = Rel::new_set(&cx, row);
+        rel.insert(vec![p.clone(); levels].as_slice());
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                assert!(
+                    query::source(&rel)
+                        .drive(&mut |d, r| {
+                            assert_eq!(d.cells, r.cells);
+                            assert_eq!(d.cells.len(), levels);
+                            for i in 0..levels {
+                                assert_eq!(d.root(i), (a, p.function()));
+                            }
+                            ControlFlow::Break(())
+                        })
+                        .is_break()
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
 }

@@ -334,12 +334,12 @@ impl Rel {
                     self.children.clear();
                     points
                 });
-                let out = self.branches.finish(index.empty());
                 // Union the points after every symbolic branch.
-                match points {
-                    Some(p) => out.apply(BoolOp::Or, &p),
-                    None => out,
-                }
+                self.branches
+                    .drain()
+                    .chain(points)
+                    .reduce(|a, b| a.apply(BoolOp::Or, &b))
+                    .unwrap_or_else(|| index.empty())
             }
         }
 

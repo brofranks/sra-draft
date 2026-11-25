@@ -1087,7 +1087,7 @@ impl IntoQuery for &Rel {
 /// incompatible scalar sorts, or matched fixed columns require incompatible
 /// storage, as [`symmetric_difference`](IntoQuery::symmetric_difference)
 /// does, or if the comparison's map equations form a cycle or a map transfers
-/// a predicate between endpoints in different columns.
+/// a predicate between endpoints in different columns or lacks backend support.
 impl<A: Exec, B: Exec> PartialEq<Query<B>> for Query<A> {
     #[inline(always)]
     fn eq(&self, other: &Query<B>) -> bool {
@@ -1149,6 +1149,14 @@ pub fn project(
         ends[input.sort().scalar_len()..].len(),
         range.sort().scalar_len(),
         "one projection position per range column"
+    );
+    let leaves: Vec<_> = input.leaf_sorts(cx).collect();
+    assert!(
+        ends[input.sort().scalar_len()..]
+            .iter()
+            .map(|&i| leaves[i])
+            .eq(range.leaf_sorts(cx)),
+        "projection must preserve logical scalar sorts"
     );
     let universe = if input.sort() == range.sort()
         && ends[..input.sort().scalar_len()] == ends[input.sort().scalar_len()..]
@@ -1304,7 +1312,7 @@ impl<A: Exec> Query<A> {
     /// # Panics
     ///
     /// Panics if the query's map equations form a cycle, or a map transfers
-    /// a predicate between endpoints in different columns.
+    /// a predicate between endpoints in different columns or lacks backend support.
     pub fn drive<B>(
         &self,
         then: &mut impl for<'a> FnMut(Binding<'a>, Binding<'a>) -> ControlFlow<B>,
@@ -1321,7 +1329,7 @@ impl<A: Exec> Query<A> {
     /// # Panics
     ///
     /// Panics if the query's map equations form a cycle, or a map transfers
-    /// a predicate between endpoints in different columns.
+    /// a predicate between endpoints in different columns or lacks backend support.
     pub fn is_empty(&self) -> bool {
         self.visit(&[], 0, &mut |_, _| ControlFlow::Break(()))
             .is_continue()
@@ -1344,7 +1352,7 @@ impl<A: Exec> Query<A> {
     /// # Panics
     ///
     /// Panics if the query's map equations form a cycle, or a map transfers
-    /// a predicate between endpoints in different columns.
+    /// a predicate between endpoints in different columns or lacks backend support.
     pub fn count(&self) -> Count {
         let mut cells = Vec::new();
         for &cell in self.ends.iter() {
@@ -1414,7 +1422,7 @@ impl<A: Exec> Query<A> {
     /// # Panics
     ///
     /// Panics if the query's map equations form a cycle, or a map transfers
-    /// a predicate between endpoints in different columns.
+    /// a predicate between endpoints in different columns or lacks backend support.
     pub fn collect(&self) -> Rel {
         let (positions, _) = self.output();
         let rel = match self.universe {
