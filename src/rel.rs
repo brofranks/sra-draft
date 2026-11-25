@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crate::backend::BoolOp;
 use crate::context::{Context, Predicate};
-use crate::index::{Index, IndexRoot};
+use crate::index::{BalancedUnion, Index, IndexRoot};
 use crate::row::{self, Domain, IntoRow, Row, RowSink};
 use crate::scalar::compare;
 use crate::util::count::Count;
@@ -106,8 +106,18 @@ impl Rel {
         }
     }
 
+    /// The relation with the same declared endpoints and the supplied root.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the root belongs to another physical index.
     #[inline(always)]
-    fn with_root(&self, root: IndexRoot) -> Self {
+    pub fn with_root(&self, root: IndexRoot) -> Self {
+        assert_eq!(
+            self.root.index(),
+            root.index(),
+            "index roots must share a physical layout"
+        );
         Self {
             root,
             args: self.args.clone(),
@@ -311,30 +321,10 @@ impl Rel {
             predicate: Option<&'a Predicate>,
             keys: Vec<u64>,
             children: Vec<IndexRoot>,
-            /// A binary counter of symbolic branches.
-            ///
-            /// Occupied slot `i` holds the union of `2^i` branches, so `k`
-            /// branches of similar size cost `O(log k)` rounds of pairwise
-            /// unions.
-            branches: Vec<Option<IndexRoot>>,
+            branches: BalancedUnion,
         }
 
         impl Frame<'_> {
-            /// Adds a symbolic branch to the balanced union.
-            #[inline(always)]
-            fn push_branch(&mut self, mut value: IndexRoot) {
-                for slot in &mut self.branches {
-                    match slot.take() {
-                        Some(left) => value = left.apply(BoolOp::Or, &value),
-                        None => {
-                            *slot = Some(value);
-                            return;
-                        }
-                    }
-                }
-                self.branches.push(Some(value));
-            }
-
             /// Unions the pending branches and ground points, emptying their buffers.
             fn finish(&mut self, index: &Index, level: usize) -> IndexRoot {
                 let points = (!self.keys.is_empty()).then(|| {
@@ -344,14 +334,12 @@ impl Rel {
                     self.children.clear();
                     points
                 });
-                self.branches
-                    .drain(..)
-                    .rev()
-                    .flatten()
-                    // Union the points after every symbolic branch.
-                    .chain(points)
-                    .reduce(|a, b| a.apply(BoolOp::Or, &b))
-                    .unwrap_or_else(|| index.empty())
+                let out = self.branches.finish(index.empty());
+                // Union the points after every symbolic branch.
+                match points {
+                    Some(p) => out.apply(BoolOp::Or, &p),
+                    None => out,
+                }
             }
         }
 
@@ -395,7 +383,9 @@ impl Rel {
                 continue;
             }
             if let Some(p) = frame.predicate {
-                frame.push_branch(index.cases(level, &index.empty(), &[(p, &child)]));
+                frame
+                    .branches
+                    .push(index.cases(level, &index.empty(), &[(p, &child)]));
             } else {
                 frame.keys.extend_from_slice(frame.key);
                 frame.children.push(child);

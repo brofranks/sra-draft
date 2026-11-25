@@ -5,12 +5,14 @@
 //! same algebra. Logical declarations and rows live above this layer.
 
 use std::fmt;
+use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use super::{AlgebraId, Context, Predicate};
-use crate::backend::BoolOp;
-use crate::index_store::{Id, Store};
+use crate::backend::{BoolOp, Function, Refine};
+use crate::index_store::{Id, Node, Store};
 use crate::util::count::Count;
+use crate::util::dag::Idx;
 
 // Amortize the fixed cost of collecting transient results.
 const NODE_CAPACITY: usize = 65_536;
@@ -248,6 +250,25 @@ impl IndexRoot {
         self.id == Id::FALSE
     }
 
+    /// The root and its level, borrowed for traversal.
+    pub fn residual(&self) -> Residual<'_> {
+        Residual {
+            index: &self.index,
+            id: self.id,
+            node: self.index.store.head(self.id),
+        }
+    }
+
+    /// The predicate and continuation of a single attached case at `level`.
+    ///
+    /// Returns both handles owned when the first of two classes is empty.
+    pub fn attachment(&self, level: usize) -> Option<(Predicate, Self)> {
+        let (f, child) = self.index.store.attachment(self.id, level)?;
+        let p = self.index.cx.predicate(self.index.algebra(level), f);
+        self.index.store.inc_ref(child);
+        Some((p, self.index.adopt(child)))
+    }
+
     /// Whether one packed value per level forms a member of the root.
     ///
     /// # Panics
@@ -290,5 +311,119 @@ impl Clone for IndexRoot {
 impl Drop for IndexRoot {
     fn drop(&mut self) {
         self.index.store.dec_ref(self.id);
+    }
+}
+
+/// A residual tuple set borrowed from a retained source root.
+///
+/// Descendants stay live across calls into scalar backends and continuations.
+#[derive(Clone, Copy)]
+pub struct Residual<'a> {
+    index: &'a Index,
+    id: Id,
+    node: Node,
+}
+
+impl Residual<'_> {
+    /// The memo key in this source index during the lifetime of its root.
+    #[inline(always)]
+    pub fn key(self) -> usize {
+        self.id.index()
+    }
+
+    /// The first constrained level, with terminals at `u32::MAX` after every level.
+    #[inline(always)]
+    pub fn level(self) -> usize {
+        self.node.level as usize
+    }
+
+    /// Visits the nonempty children satisfying this level's scalar restriction.
+    ///
+    /// The caller keeps `p` referenced in `algebra`. Each visit transfers one
+    /// owned scalar predicate reference and borrows its native continuation.
+    /// The index read guard is released before building the cell or calling
+    /// the continuation. Returning `Break` stops the walk.
+    ///
+    /// # Panics
+    ///
+    /// Panics on a terminal or when the algebra differs from this level's.
+    pub fn refine<B>(
+        self,
+        algebra: AlgebraId,
+        p: Function,
+        scratch: &mut Refine,
+        mut then: impl FnMut(Function, Self) -> ControlFlow<B>,
+    ) -> ControlFlow<B> {
+        assert_eq!(
+            self.index.algebra(self.level()),
+            algebra,
+            "query variable uses incompatible algebras"
+        );
+        let mut stopped = None;
+        let flow = self.index.cx.resolve(algebra).refine(
+            self.node.partition,
+            p,
+            scratch,
+            &mut |i| i != self.node.hole,
+            &mut |i, build| {
+                let (id, node) = self.index.store.child(self.id, i);
+                then(
+                    build(),
+                    Self {
+                        index: self.index,
+                        id,
+                        node,
+                    },
+                )
+                .map_break(|b| stopped = Some(b))
+            },
+        );
+        debug_assert_eq!(
+            flow.is_break(),
+            stopped.is_some(),
+            "backend violated the refinement Break contract"
+        );
+        stopped.map_or(ControlFlow::Continue(()), ControlFlow::Break)
+    }
+}
+
+/// A balanced union of roots in one native index.
+///
+/// Occupied slot `i` holds the union of `2^i` branches, so `k` branches
+/// of similar size cost `O(log k)` rounds of pairwise unions.
+#[derive(Default)]
+pub struct BalancedUnion(Vec<Option<IndexRoot>>);
+
+impl BalancedUnion {
+    /// Adds a branch to the union.
+    ///
+    /// # Panics
+    ///
+    /// Panics if roots combined by this union belong to different indexes.
+    #[inline(always)]
+    pub fn push(&mut self, mut root: IndexRoot) {
+        for slot in &mut self.0 {
+            match slot.take() {
+                Some(left) => root = left.apply(BoolOp::Or, &root),
+                None => {
+                    *slot = Some(root);
+                    return;
+                }
+            }
+        }
+        self.0.push(Some(root));
+    }
+
+    /// Unions the pending branches with `out` and clears the buffer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if roots combined by this union belong to different indexes.
+    pub fn finish(&mut self, out: IndexRoot) -> IndexRoot {
+        self.0
+            .drain(..)
+            .rev()
+            .flatten()
+            .fold(out, |a, b| a.apply(BoolOp::Or, &b))
     }
 }

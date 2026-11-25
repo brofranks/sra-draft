@@ -353,6 +353,19 @@ impl Context {
         }
     }
 
+    /// Acquires a reference to a live predicate token in `algebra`.
+    ///
+    /// The caller keeps the token referenced in this algebra during the call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the algebra belongs to another context.
+    #[inline(always)]
+    pub fn predicate(&self, algebra: AlgebraId, function: Function) -> Predicate {
+        self.resolve(algebra).inc_ref(function);
+        self.adopt(algebra, function)
+    }
+
     /// The empty predicate over `algebra`.
     ///
     /// # Panics

@@ -39,11 +39,11 @@ impl Id {
 }
 
 #[derive(Clone, Copy)]
-struct Node {
-    level: u32,
-    partition: Function,
+pub struct Node {
+    pub level: u32,
+    pub partition: Function,
     /// The class that leads to the empty set, or `u32::MAX`.
-    hole: u32,
+    pub hole: u32,
 }
 
 impl Node {
@@ -438,6 +438,32 @@ impl Store {
     #[inline(always)]
     fn read(&self) -> Read<'_, State> {
         self.shared.read(&self.layout)
+    }
+
+    /// The immutable head of a live residual, copied out of its read guard.
+    pub fn head(&self, id: Id) -> Node {
+        if id.is_constant() {
+            Node::TERMINAL
+        } else {
+            *self.read().node(id).value
+        }
+    }
+
+    /// The selected child and its head, read while the parent is retained.
+    pub fn child(&self, id: Id, class: u32) -> (Id, Node) {
+        let state = self.read();
+        let child = state.node(id).edges[class as usize];
+        (child, *state.node(child).value)
+    }
+
+    /// The borrowed predicate and child of a single attached case at `level`.
+    pub fn attachment(&self, id: Id, level: usize) -> Option<(Function, Id)> {
+        let state = self.read();
+        let node = state.node(id);
+        match node.edges {
+            &[Id::FALSE, child] if node.level as usize == level => Some((node.partition, child)),
+            _ => None,
+        }
     }
 
     /// Whether one packed value per level forms a member of `root`.

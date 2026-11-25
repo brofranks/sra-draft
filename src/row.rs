@@ -214,6 +214,17 @@ impl Row {
         &self.layout[self.start..][..self.sort.scalar_len()]
     }
 
+    /// The algebra bound to this scalar row.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the row is a record or product.
+    #[inline(always)]
+    pub fn scalar_algebra(&self) -> AlgebraId {
+        self.sort.scalar();
+        self.algebras()[0]
+    }
+
     /// The immediate member rows in declaration order, sharing this layout.
     ///
     /// # Panics
