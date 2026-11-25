@@ -15,7 +15,7 @@
 use std::ops::{ControlFlow, Range};
 use std::sync::Arc;
 
-use crate::backend::{BoolOp, Function, MapSpec, Refine};
+use crate::backend::{Algebra, BoolOp, Function, MapSpec, Refine};
 use crate::context::{AlgebraId, Context, Predicate};
 use crate::index::{BalancedUnion, Index, IndexRoot, Residual};
 use crate::util::dag::{Map, Set, structural_hash};
@@ -524,13 +524,20 @@ impl Exec for () {
 /// builds one cell per explored child and nothing for siblings after a break.
 /// The invocation retains its native source root throughout the walk, so
 /// every yielded child stays reachable.
-fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
+fn walk<
+    'x,
+    A: Algebra + ?Sized + 'x,
+    P: Fn(AlgebraId) -> &'x A,
+    M: Mode,
+    K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>,
+>(
     root: Residual<'_>,
     cells: Range<usize>,
     eval: &mut Run<'_>,
     memo: &mut M::Memo,
     mode: &mut M,
     then: &mut K,
+    pick: &P,
 ) -> Flow<M> {
     /// One level whose suffix is in progress.
     struct Frame<'a, M: Mode> {
@@ -578,7 +585,7 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
                     let Cell {
                         algebra, function, ..
                     } = eval.cells[cell];
-                    root.refine(algebra, function, &mut scratch);
+                    root.refine(algebra, pick(algebra), function, &mut scratch);
                     frames.push(Frame {
                         cell,
                         level,
@@ -612,8 +619,7 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
             }
         }
         let (scratch, sum) = frame.sum.as_mut().unwrap();
-        let cx = eval.cx;
-        let algebra = cx.resolve(eval.cells[frame.cell].algebra);
+        let algebra = pick(eval.cells[frame.cell].algebra);
         while let Some(child) = frame.root.next(algebra, scratch) {
             let p = algebra.cell(scratch);
             if let Some(mark) = eval.tighten(frame.cell, p) {
@@ -674,14 +680,20 @@ impl Exec for IndexRoot {
                 eval.cells[cell].reads != 1 || !eval.cells[cell].function.is_t() || mode.needs(cell)
             })
             .map_or(0, |i| i + 1);
-        let result = walk(
-            self.residual(),
-            map.start..map.start + stop,
-            eval,
-            memo,
-            mode,
-            then,
-        );
+        // Scratch: an index whose levels all share one packed sparse column
+        // walks with that table statically dispatched.
+        let index = self.index();
+        let first = index.algebra(0);
+        let cx = eval.cx;
+        let packed = (0..arity)
+            .all(|i| index.algebra(i) == first)
+            .then(|| cx.resolve(first).as_packed())
+            .flatten();
+        let cells = map.start..map.start + stop;
+        let result = match packed {
+            Some(p) => walk(self.residual(), cells, eval, memo, mode, then, &|_| p),
+            None => walk(self.residual(), cells, eval, memo, mode, then, &|id| cx.resolve(id)),
+        };
         eval.pop_reads(arity);
         result
     }

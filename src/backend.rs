@@ -700,6 +700,11 @@ pub trait Algebra: Send + Sync {
     /// built costs no construction.
     fn cell(&self, scratch: &mut Refine) -> Function;
 
+    /// Scratch: this algebra as a concrete packed sparse table.
+    fn as_packed(&self) -> Option<&crate::sparse::SparseAlgebra<crate::sparse::Packed>> {
+        None
+    }
+
     /// Returns a cursor over the members of `p` that owns a root reference
     /// until dropped.
     ///

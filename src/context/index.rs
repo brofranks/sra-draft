@@ -346,16 +346,19 @@ impl Residual<'_> {
     /// # Panics
     ///
     /// Panics on a terminal or when the algebra differs from this level's.
-    pub fn refine(self, algebra: AlgebraId, p: Function, scratch: &mut Refine) {
+    pub fn refine<A: Algebra + ?Sized>(
+        self,
+        algebra: AlgebraId,
+        alg: &A,
+        p: Function,
+        scratch: &mut Refine,
+    ) {
         assert_eq!(
             self.index.algebra(self.level()),
             algebra,
             "query variable uses incompatible algebras"
         );
-        self.index
-            .cx
-            .resolve(algebra)
-            .refine(self.node.partition, p, scratch);
+        alg.refine(self.node.partition, p, scratch);
     }
 
     /// The next nonempty child of the refinement in `scratch`, or `None` once
@@ -363,7 +366,8 @@ impl Residual<'_> {
     ///
     /// The index read guard is released before returning, so the caller may
     /// build the child's cell and explore it before asking for the next one.
-    pub fn next(self, algebra: &dyn Algebra, scratch: &mut Refine) -> Option<Self> {
+    #[inline(always)]
+    pub fn next<A: Algebra + ?Sized>(self, algebra: &A, scratch: &mut Refine) -> Option<Self> {
         let i = algebra.next(scratch, &mut |i| i != self.node.hole)?;
         let (id, node) = self.index.store.child(self.id, i);
         Some(Self {

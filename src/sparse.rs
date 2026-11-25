@@ -42,7 +42,7 @@ struct Node {
 /// using eight bytes per transition. Wider sorts store the key words followed
 /// by a payload word. Every reader and writer of edge words uses the layout.
 /// Each binding interprets shared edge words at its own stride.
-trait Layout: Copy + Send + Sync + 'static {
+pub trait Layout: Copy + Send + Sync + 'static {
     /// One transition's key: the packed word's high half, or a borrowed
     /// key-word slice.
     type Key<'a>: Copy;
@@ -62,7 +62,7 @@ trait Layout: Copy + Send + Sync + 'static {
 }
 
 #[derive(Clone, Copy)]
-struct Packed;
+pub struct Packed;
 
 impl Layout for Packed {
     type Key<'a> = u64;
@@ -489,7 +489,7 @@ impl<L: Layout> Drop for SparseCursor<'_, L> {
 
 /// A sparse table bound to one scalar sort, with the transition layout its
 /// width selects.
-struct SparseAlgebra<L> {
+pub struct SparseAlgebra<L> {
     store: Arc<SparseStore>,
     sort: ScalarSort,
     l: L,
@@ -545,6 +545,10 @@ impl<L: Layout> SparseAlgebra<L> {
 }
 
 impl<L: Layout> Algebra for SparseAlgebra<L> {
+    fn as_packed(&self) -> Option<&SparseAlgebra<Packed>> {
+        (self as &dyn std::any::Any).downcast_ref()
+    }
+
     /// The bound scalar sort.
     fn sort(&self) -> ScalarSort {
         self.sort
