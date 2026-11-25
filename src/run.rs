@@ -110,12 +110,11 @@ pub struct Run<'c> {
     pub equations: Vec<Equation>,
     /// Cell roots replaced by the narrowings in progress, restored on return.
     undo: Vec<(usize, Function)>,
-    /// Idle refinement buffers.
+    /// The refinement buffer.
     ///
-    /// Refinements nest through their delivered cells, so each active level
-    /// holds one. Returning it here lets sibling calls at that level reuse its
-    /// buffers.
-    refinements: Vec<Refine>,
+    /// Each refinement completes before its cells are explored, so one buffer
+    /// serves every level and sibling call.
+    refine: Refine,
 }
 
 impl<'c> Run<'c> {
@@ -129,7 +128,7 @@ impl<'c> Run<'c> {
             maps: (0..slots.len()).collect(),
             equations: Vec::new(),
             undo: Vec::new(),
-            refinements: Vec::new(),
+            refine: Refine::default(),
         };
         eval.extend(slots);
         eval
@@ -216,17 +215,6 @@ impl<'c> Run<'c> {
         for cell in self.reads.drain(start..start + n) {
             self.cells[cell].reads -= 1;
         }
-    }
-
-    /// Restores the read footprint even when the continuation terminates
-    /// early.
-    #[inline(always)]
-    fn read<T>(&mut self, cell: usize, then: impl FnOnce(&mut Self) -> T) -> T {
-        debug_assert_eq!(self.reads.last(), Some(&cell));
-        self.pop_reads(1);
-        let result = then(self);
-        self.push_read(cell);
-        result
     }
 
     /// Whether the active equations, a forest, already connect `a` to `b`.
@@ -396,24 +384,43 @@ impl<'c> Run<'c> {
         mode: &mut M,
         then: impl FnOnce(&mut Self, &mut M) -> Flow<M>,
     ) -> Flow<M> {
+        let Some(mark) = self.tighten(cell, p) else {
+            return ControlFlow::Continue(mode.identity());
+        };
+        let result = then(self, mode);
+        self.restore(mark);
+        result
+    }
+
+    /// The undo mark after restricting `cell` to `p`, one owned reference in
+    /// the cell's column, and tightening every cell an active equation
+    /// connects to it.
+    ///
+    /// An empty `p` changes nothing and returns `None`.
+    #[inline(always)]
+    pub fn tighten(&mut self, cell: usize, p: Function) -> Option<usize> {
         if p.is_f() {
             self.cx.resolve(self.cells[cell].algebra).dec_ref(p);
-            return ControlFlow::Continue(mode.identity());
-        }
-        if self.equations.is_empty() && p == self.cells[cell].function {
-            self.cx.resolve(self.cells[cell].algebra).dec_ref(p);
-            return then(self, mode);
+            return None;
         }
         let mark = self.undo.len();
-        self.assign(cell, p, usize::MAX);
-        let result = then(self, mode);
+        if self.equations.is_empty() && p == self.cells[cell].function {
+            self.cx.resolve(self.cells[cell].algebra).dec_ref(p);
+        } else {
+            self.assign(cell, p, usize::MAX);
+        }
+        Some(mark)
+    }
+
+    /// Restores the cell roots replaced since the undo mark `mark`.
+    #[inline(always)]
+    pub fn restore(&mut self, mark: usize) {
         for (cell, old) in self.undo.drain(mark..).rev() {
             let c = &mut self.cells[cell];
             self.cx
                 .resolve(c.algebra)
                 .dec_ref(std::mem::replace(&mut c.function, old));
         }
-        result
     }
 }
 
@@ -508,62 +515,187 @@ impl Exec for () {
     }
 }
 
-/// Refines the cells in `cells` against `root` from coordinate `level` onward,
-/// running `then` on each accepting branch.
+/// Refines the cells in `cells` against `root`, running `then` on each
+/// accepting branch.
 ///
-/// Runtime field recursion passes the same continuation type unchanged. The
-/// invocation retains its native source root throughout recursion, so
-/// every borrowed child stays reachable.
+/// Each level keeps a heap frame rather than a native one, so the stack depth
+/// stays independent of the row width. A level explores its first refinement
+/// cell before building the others, so an early exit builds one cell per level.
+/// Returning to the level collects the remaining cells in one further
+/// refinement, and a break releases the cells still unexplored.
+/// The invocation retains its native source root throughout the walk, so
+/// every collected child stays reachable.
 fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
     root: Residual<'_>,
-    level: usize,
-    mut cells: Range<usize>,
+    cells: Range<usize>,
     eval: &mut Run<'_>,
     memo: &mut M::Memo,
     mode: &mut M,
     then: &mut K,
 ) -> Flow<M> {
-    // An unobserved, unrestricted trailing suffix already has a witness in
-    // this nonempty residual.
-    let Some(pos) = cells.next() else {
-        return then(eval, mode);
-    };
-    let descend = || {
-        mode.level(memo, root.key(), level, eval, |eval, mode, memo| {
-            let cell = eval.maps[pos];
-            if root.level() > level {
-                // A skipped source level admits the full field universe and can
-                // adopt the other source's algebra.
-                return eval.read(cell, |eval| {
-                    walk(root, level + 1, cells, eval, memo, mode, then)
-                });
+    /// One level whose suffix is in progress.
+    struct Frame<'a, M: Mode> {
+        cell: usize,
+        level: usize,
+        state: M::Level,
+        /// The refinement in progress, or `None` for a skipped level.
+        sum: Option<Sum<'a, M>>,
+        /// The undo mark of the cell being explored.
+        mark: usize,
+    }
+    /// The refinement of one level in progress.
+    struct Sum<'a, M: Mode> {
+        /// The sum over the explored cells.
+        sum: M::Sum,
+        /// The position of this level's first cell in `Held`.
+        start: usize,
+        /// The root and first class of the cells still to collect.
+        rest: Option<(Residual<'a>, u32)>,
+    }
+    /// Refinement cells still to explore, each frame's in reverse order above
+    /// its parent's.
+    struct Held<'a, 'c> {
+        cx: &'c Context,
+        cells: Vec<(AlgebraId, Function, Residual<'a>)>,
+    }
+    impl Held<'_, '_> {
+        fn release(&mut self, start: usize) {
+            for (algebra, p, _) in self.cells.drain(start..) {
+                self.cx.resolve(algebra).dec_ref(p);
             }
-            let mut out = mode.sum();
-            let mut scratch = eval.refinements.pop().unwrap_or_default();
-            let flow = root.refine(
-                eval.cells[cell].algebra,
-                eval.cells[cell].function,
-                &mut scratch,
-                |p, child| {
-                    let result = eval.narrow(cell, p, mode, |eval, mode| {
-                        eval.read(cell, |eval| {
-                            walk(child, level + 1, cells.clone(), eval, memo, mode, then)
-                        })
-                    });
-                    mode.push(&mut out, cell, result?);
-                    ControlFlow::Continue(())
-                },
-            );
-            eval.refinements.push(scratch);
-            flow.map_continue(|()| mode.finish_sum(out))
-        })
+        }
+    }
+    impl Drop for Held<'_, '_> {
+        fn drop(&mut self) {
+            self.release(0);
+        }
+    }
+    /// Buffers the refinement cells of `cell` against `root` outside class
+    /// `skip`, or only the first one without `skip`, and returns its class
+    /// when another cell remains.
+    fn fill<'a>(
+        root: Residual<'a>,
+        cell: usize,
+        skip: Option<u32>,
+        eval: &mut Run<'_>,
+        held: &mut Held<'a, '_>,
+    ) -> Option<u32> {
+        let start = held.cells.len();
+        let algebra = eval.cells[cell].algebra;
+        let mut first = None;
+        let more = root.refine(
+            algebra,
+            eval.cells[cell].function,
+            skip,
+            &mut eval.refine,
+            |class, build, child| {
+                if skip.is_none() && first.is_some() {
+                    // A second cell remains for a later refinement.
+                    return ControlFlow::Break(());
+                }
+                held.cells.push((algebra, build(), child));
+                first.get_or_insert(class);
+                ControlFlow::Continue(())
+            },
+        );
+        held.cells[start..].reverse();
+        first.filter(|_| more.is_break())
+    }
+    let mut frames: Vec<Frame<'_, M>> = Vec::new();
+    let mut held = Held {
+        cx: eval.cx,
+        cells: Vec::new(),
     };
-    // A refinement lends its continuation to the backend. Keep those calls
-    // nested so a break stops even the first unfinished refinement.
-    if level != 0 && level.is_multiple_of(8) {
-        stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, descend)
-    } else {
-        descend()
+    let mut next = Some((root, 0));
+    let mut result = None;
+    loop {
+        if let Some((root, level)) = next.take() {
+            // An unobserved, unrestricted trailing suffix already has a
+            // witness in this nonempty residual.
+            if level == cells.len() {
+                result = Some(then(eval, mode));
+            } else {
+                let cell = eval.maps[cells.start + level];
+                let (state, cached) = mode.enter(memo, root.key(), level, eval);
+                if let Some(flow) = cached {
+                    result = Some(mode.exit(memo, level, state, eval, flow));
+                } else if root.level() > level {
+                    // A skipped source level admits the full field universe
+                    // and can adopt the other source's algebra.
+                    debug_assert_eq!(eval.reads.last(), Some(&cell));
+                    eval.pop_reads(1);
+                    frames.push(Frame {
+                        cell,
+                        level,
+                        state,
+                        sum: None,
+                        mark: 0,
+                    });
+                    next = Some((root, level + 1));
+                    continue;
+                } else {
+                    let start = held.cells.len();
+                    let rest = fill(root, cell, None, eval, &mut held).map(|class| (root, class));
+                    frames.push(Frame {
+                        cell,
+                        level,
+                        state,
+                        sum: Some(Sum {
+                            sum: mode.sum(),
+                            start,
+                            rest,
+                        }),
+                        mark: 0,
+                    });
+                }
+            }
+        }
+        let Some(frame) = frames.last_mut() else {
+            return result.expect("an empty walk yields its continuation's result");
+        };
+        if let Some(flow) = result.take() {
+            eval.push_read(frame.cell);
+            match (&mut frame.sum, flow) {
+                (Some(Sum { sum, .. }), ControlFlow::Continue(value)) => {
+                    eval.restore(frame.mark);
+                    mode.push(sum, frame.cell, value);
+                }
+                (sum, flow) => {
+                    if let Some(Sum { start, .. }) = sum {
+                        eval.restore(frame.mark);
+                        held.release(*start);
+                    }
+                    let f = frames.pop().unwrap();
+                    result = Some(mode.exit(memo, f.level, f.state, eval, flow));
+                    continue;
+                }
+            }
+        }
+        let Sum { sum, start, rest } = frame.sum.as_mut().unwrap();
+        loop {
+            if held.cells.len() == *start {
+                let Some((root, class)) = rest.take() else {
+                    break;
+                };
+                fill(root, frame.cell, Some(class), eval, &mut held);
+                continue;
+            }
+            let (_, p, child) = held.cells.pop().unwrap();
+            if let Some(mark) = eval.tighten(frame.cell, p) {
+                frame.mark = mark;
+                debug_assert_eq!(eval.reads.last(), Some(&frame.cell));
+                eval.pop_reads(1);
+                next = Some((child, frame.level + 1));
+                break;
+            }
+            let empty = mode.identity();
+            mode.push(sum, frame.cell, empty);
+        }
+        if next.is_none() {
+            let f = frames.pop().unwrap();
+            let out = mode.finish_sum(f.sum.unwrap().sum);
+            result = Some(mode.exit(memo, f.level, f.state, eval, ControlFlow::Continue(out)));
+        }
     }
 }
 
@@ -607,7 +739,6 @@ impl Exec for IndexRoot {
             .map_or(0, |i| i + 1);
         let result = walk(
             self.residual(),
-            0,
             map.start..map.start + stop,
             eval,
             memo,
@@ -632,6 +763,8 @@ pub trait Mode: Sized {
     type Memo: Default;
     /// The accumulator over the refinement cells of one level.
     type Sum;
+    /// The state one open source level carries to its exit.
+    type Level;
     /// A fresh or recycled sum for one level.
     fn sum(&mut self) -> Self::Sum;
     /// Adds one branch of the refinement of `cell` to the sum over its cells.
@@ -661,15 +794,23 @@ pub trait Mode: Sized {
     ) -> Flow<Self> {
         then(eval, self)
     }
-    /// Wraps one source level: finalize unread outputs, then reuse or compute
-    /// the suffix.
-    fn level(
+    /// Opens one source level: finalizes unread outputs, then returns the
+    /// state for [`exit`](Self::exit) and any reused suffix.
+    fn enter(
         &mut self,
         memo: &mut Self::Memo,
         root: usize,
         level: usize,
-        eval: &mut Run<'_>,
-        then: impl FnOnce(&mut Run<'_>, &mut Self, &mut Self::Memo) -> Flow<Self>,
+        eval: &Run<'_>,
+    ) -> (Self::Level, Option<Flow<Self>>);
+    /// Closes one source level opened with `state` over its suffix `result`.
+    fn exit(
+        &mut self,
+        memo: &mut Self::Memo,
+        level: usize,
+        state: Self::Level,
+        eval: &Run<'_>,
+        result: Flow<Self>,
     ) -> Flow<Self>;
 }
 
@@ -689,6 +830,7 @@ impl<B, F: for<'a> FnMut(Binding<'a>, Binding<'a>) -> ControlFlow<B>> Mode for V
     type Break = B;
     type Memo = ();
     type Sum = ();
+    type Level = ();
     #[inline(always)]
     fn sum(&mut self) {}
     #[inline(always)]
@@ -718,15 +860,12 @@ impl<B, F: for<'a> FnMut(Binding<'a>, Binding<'a>) -> ControlFlow<B>> Mode for V
         self.ends.contains(&cell)
     }
     #[inline(always)]
-    fn level(
-        &mut self,
-        memo: &mut (),
-        _: usize,
-        _: usize,
-        eval: &mut Run<'_>,
-        then: impl FnOnce(&mut Run<'_>, &mut Self, &mut ()) -> ControlFlow<B>,
-    ) -> ControlFlow<B> {
-        then(eval, self, memo)
+    fn enter(&mut self, _: &mut (), _: usize, _: usize, _: &Run<'_>) -> ((), Option<Flow<Self>>) {
+        ((), None)
+    }
+    #[inline(always)]
+    fn exit(&mut self, _: &mut (), _: usize, _: (), _: &Run<'_>, result: Flow<Self>) -> Flow<Self> {
+        result
     }
 }
 
@@ -893,6 +1032,8 @@ impl Mode for Collect {
     type Break = IndexRoot;
     type Memo = Memo;
     type Sum = Sum;
+    /// The first retirement of the level and the key of a suffix to store.
+    type Level = (usize, Option<Box<[usize]>>);
     #[inline(always)]
     fn sum(&mut self) -> Self::Sum {
         self.sums.pop().unwrap_or_default()
@@ -993,14 +1134,13 @@ impl Mode for Collect {
     }
 
     #[inline(always)]
-    fn level(
+    fn enter(
         &mut self,
         memo: &mut Memo,
         root: usize,
         level: usize,
-        eval: &mut Run<'_>,
-        then: impl FnOnce(&mut Run<'_>, &mut Self, &mut Memo) -> Flow<Self>,
-    ) -> Flow<Self> {
+        eval: &Run<'_>,
+    ) -> (Self::Level, Option<Flow<Self>>) {
         let start = self.retired.len();
         for cell in 0..self.pending.len() {
             if self.pending[cell] && eval.cells[cell].reads == 0 {
@@ -1015,43 +1155,48 @@ impl Mode for Collect {
         // values, so composition chains recompute it once per upstream branch.
         // The gate trades that recomputation for cheaper keys and smaller
         // caches.
-        let mut result = if self.coordinates < 2 {
-            then(eval, self, memo)
-        } else {
-            if memo.len() <= level {
-                memo.resize_with(level + 1, MemoLevel::default);
-            }
-            self.key.clear();
-            self.key.push(self.branches.len());
-            self.key
-                .extend(self.branches.iter().map(|&right| usize::from(right)));
-            self.key.push(root);
-            self.key.extend(
-                eval.reads
-                    .iter()
-                    .map(|&cell| eval.cells[cell].function.index()),
-            );
-            let cached = memo[level].entries.get(self.key.as_slice()).cloned();
-            match cached {
-                Some(suffix) => self.observe(suffix, eval),
-                None => {
-                    let repeat = !memo[level]
-                        .seen
-                        .insert(structural_hash(self.key.as_slice()));
-                    // Deeper levels reuse the scratch, so this key is fixed
-                    // before descending.
-                    let key: Option<Box<[usize]>> = repeat.then(|| self.key.as_slice().into());
-                    let result = then(eval, self, memo);
-                    if let (Some(key), ControlFlow::Continue(suffix)) = (key, &result) {
-                        memo[level]
-                            .live
-                            .extend(eval.reads.iter().map(|&cell| eval.predicate(cell)));
-                        memo[level].entries.insert(key, suffix.clone());
-                    }
-                    result
-                }
-            }
-        };
+        if self.coordinates < 2 {
+            return ((start, None), None);
+        }
+        if memo.len() <= level {
+            memo.resize_with(level + 1, MemoLevel::default);
+        }
+        self.key.clear();
+        self.key.push(self.branches.len());
+        self.key
+            .extend(self.branches.iter().map(|&right| usize::from(right)));
+        self.key.push(root);
+        self.key.extend(
+            eval.reads
+                .iter()
+                .map(|&cell| eval.cells[cell].function.index()),
+        );
+        if let Some(suffix) = memo[level].entries.get(self.key.as_slice()).cloned() {
+            return ((start, None), Some(self.observe(suffix, eval)));
+        }
+        let repeat = !memo[level]
+            .seen
+            .insert(structural_hash(self.key.as_slice()));
+        // Deeper levels reuse the scratch, so this key is fixed before
+        // descending.
+        ((start, repeat.then(|| self.key.as_slice().into())), None)
+    }
+
+    #[inline(always)]
+    fn exit(
+        &mut self,
+        memo: &mut Memo,
+        level: usize,
+        (start, key): Self::Level,
+        eval: &Run<'_>,
+        mut result: Flow<Self>,
+    ) -> Flow<Self> {
+        if let (Some(key), ControlFlow::Continue(suffix)) = (key, &result) {
+            memo[level]
+                .live
+                .extend(eval.reads.iter().map(|&cell| eval.predicate(cell)));
+            memo[level].entries.insert(key, suffix.clone());
+        }
         while self.retired.len() > start {
             let cell = self.retired.pop().unwrap();
             self.pending[cell] = true;

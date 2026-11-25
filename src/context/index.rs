@@ -337,10 +337,13 @@ impl Residual<'_> {
         self.node.level as usize
     }
 
-    /// Visits the nonempty children satisfying this level's scalar restriction.
+    /// Visits the nonempty children satisfying this level's scalar restriction,
+    /// except the one in class `skip`.
     ///
-    /// The caller keeps `p` referenced in `algebra`. Each visit transfers one
-    /// owned scalar predicate reference and borrows its native continuation.
+    /// Each visit passes the child's class, which identifies it within this
+    /// root, and a builder for its cell. The caller keeps `p` referenced in
+    /// `algebra`. Each build transfers one owned scalar predicate reference.
+    /// A visit borrows its native continuation.
     /// The index read guard is released before building the cell or calling
     /// the continuation. Returning `Break` stops the walk.
     ///
@@ -351,8 +354,9 @@ impl Residual<'_> {
         self,
         algebra: AlgebraId,
         p: Function,
+        skip: Option<u32>,
         scratch: &mut Refine,
-        mut then: impl FnMut(Function, Self) -> ControlFlow<B>,
+        mut then: impl FnMut(u32, &mut dyn FnMut() -> Function, Self) -> ControlFlow<B>,
     ) -> ControlFlow<B> {
         assert_eq!(
             self.index.algebra(self.level()),
@@ -364,11 +368,12 @@ impl Residual<'_> {
             self.node.partition,
             p,
             scratch,
-            &mut |i| i != self.node.hole,
+            &mut |i| i != self.node.hole && Some(i) != skip,
             &mut |i, build| {
                 let (id, node) = self.index.store.child(self.id, i);
                 then(
-                    build(),
+                    i,
+                    build,
                     Self {
                         index: self.index,
                         id,

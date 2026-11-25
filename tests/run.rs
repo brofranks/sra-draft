@@ -2,8 +2,9 @@
 //! collection.
 //!
 //! The `Table` fixture is a four-value truth-table backend that counts the
-//! references on each root it hands out, so tests can observe leaked or
-//! multiply released roots and noncanonical tokens. Local fixtures construct
+//! references on each root it hands out and the refinement cells it builds,
+//! so tests can observe leaked or multiply released roots, noncanonical
+//! tokens, and cells built ahead of an early exit. Local fixtures construct
 //! relations, bind bit-vector rows, build sets, and list ground pairs, rows,
 //! and set values.
 
@@ -328,13 +329,15 @@ fn narrowing_an_empty_cell_never_calls_the_continuation() {
 
 /// A four-value truth-table store with fresh tokens for nonconstant maps.
 ///
-/// Explicit counts expose leaked or multiply released external roots.
+/// Explicit counts expose leaked or multiply released external roots and
+/// the refinement cells built.
 #[derive(Clone)]
 struct Table(Arc<Mutex<TableState>>);
 
 struct TableState {
     entries: Vec<([u32; 4], usize)>,
     cases: usize,
+    builds: usize,
 }
 
 impl Table {
@@ -342,6 +345,7 @@ impl Table {
         Self(Arc::new(Mutex::new(TableState {
             entries: vec![([0; 4], 0), ([1; 4], 0)],
             cases: 0,
+            builds: 0,
         })))
     }
 
@@ -515,7 +519,10 @@ impl Algebra for Table {
         for slot in 0..=slots.into_iter().max().unwrap() {
             let cell = std::array::from_fn(|i| u32::from(slots[i] == slot && values[i] != 0));
             if cell != [0; 4] && select(slot) {
-                then(slot, &mut || self.put(cell))?;
+                then(slot, &mut || {
+                    self.0.lock().unwrap().builds += 1;
+                    self.put(cell)
+                })?;
             }
         }
         ControlFlow::Continue(())
@@ -602,6 +609,57 @@ fn nested_narrowings_release_roots_on_return_break_and_panic() {
         }));
         assert_eq!(result.is_err(), exit == 2);
         assert_eq!(table.refs(), 0);
+    }
+}
+
+#[test]
+fn a_walk_builds_one_cell_per_level_before_a_break_and_releases_the_rest() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let table = Table::new();
+    let mut cx = tiny();
+    cx.register_backend("table", table.clone());
+    let two = cx.sorts().bv(2);
+    let t = cx
+        .sorts()
+        .record("T", &[("a", two), ("b", two), ("c", two)]);
+    for i in 0..3 {
+        cx.bind_field(cx.sorts().project(t, i), "table");
+    }
+    let row = Row::bind(&mut cx, t);
+    let algebras = row.algebras().to_vec();
+    sra::index::Index::with_capacity(&cx, &algebras, 32, 64);
+    let mut rel = Rel::new_set(&cx, row);
+    // The even-parity rows give two distinct children at each of the first two
+    // levels, so those levels have a sibling left to build at the first row.
+    for r in [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]] {
+        let cells: Vec<_> = algebras
+            .iter()
+            .zip(r)
+            .map(|(&a, v)| cx.set(a, &[v]))
+            .collect();
+        rel.insert(cells.as_slice());
+    }
+    let before = table.refs();
+    for exit in 0..3 {
+        table.0.lock().unwrap().builds = 0;
+        let mut rows = 0;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            sra::query::source(&rel).drive(&mut |_, _| {
+                rows += 1;
+                match exit {
+                    0 => ControlFlow::Continue(()),
+                    1 => ControlFlow::Break(()),
+                    _ => panic!("callback failed"),
+                }
+            })
+        }));
+        assert_eq!(result.is_err(), exit == 2);
+        assert_eq!(rows, if exit == 0 { 4 } else { 1 });
+        if exit != 0 {
+            assert_eq!(table.0.lock().unwrap().builds, algebras.len());
+        }
+        assert_eq!(table.refs(), before);
     }
 }
 
