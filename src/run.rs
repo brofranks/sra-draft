@@ -614,8 +614,7 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
         let (scratch, sum) = frame.sum.as_mut().unwrap();
         let cx = eval.cx;
         let algebra = cx.resolve(eval.cells[frame.cell].algebra);
-        while let Some(child) = frame.root.next(algebra, scratch) {
-            let p = algebra.cell(scratch);
+        while let Some((child, p)) = frame.root.next(algebra, scratch) {
             if let Some(mark) = eval.tighten(frame.cell, p) {
                 frame.mark = mark;
                 debug_assert_eq!(eval.reads.last(), Some(&frame.cell));

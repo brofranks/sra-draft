@@ -363,14 +363,17 @@ impl Residual<'_> {
     ///
     /// The index read guard is released before returning, so the caller may
     /// build the child's cell and explore it before asking for the next one.
-    pub fn next(self, algebra: &dyn Algebra, scratch: &mut Refine) -> Option<Self> {
-        let i = algebra.next(scratch, &mut |i| i != self.node.hole)?;
+    pub fn next(self, algebra: &dyn Algebra, scratch: &mut Refine) -> Option<(Self, Function)> {
+        let (i, p) = algebra.step(scratch, &mut |i| i != self.node.hole)?;
         let (id, node) = self.index.store.child(self.id, i);
-        Some(Self {
-            index: self.index,
-            id,
-            node,
-        })
+        Some((
+            Self {
+                index: self.index,
+                id,
+                node,
+            },
+            p,
+        ))
     }
 }
 

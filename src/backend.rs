@@ -700,6 +700,18 @@ pub trait Algebra: Send + Sync {
     /// built costs no construction.
     fn cell(&self, scratch: &mut Refine) -> Function;
 
+    /// The next selected class and its cell, as [`Self::next`] followed by
+    /// [`Self::cell`] in one call.
+    #[inline(always)]
+    fn step(
+        &self,
+        scratch: &mut Refine,
+        select: &mut dyn FnMut(u32) -> bool,
+    ) -> Option<(u32, Function)> {
+        let class = self.next(scratch, select)?;
+        Some((class, self.cell(scratch)))
+    }
+
     /// Returns a cursor over the members of `p` that owns a root reference
     /// until dropped.
     ///
