@@ -1,0 +1,33 @@
+name: SRA SSH worker
+on:
+  push:
+    branches: [review/query-timing-20261125034150]
+permissions: {}
+jobs:
+  ssh:
+    if: github.repository == 'brofranks/sra-draft'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.3'
+          cache: false
+      - name: Install Tailcat
+        env:
+          GOBIN: ${{ runner.temp }}
+        run: go install github.com/tailscale/tailcat/cmd/tailcat@52fbad323e9d352f1febb623e0975368e9a8cbdd
+      - name: Generate server identity
+        run: |
+          "$RUNNER_TEMP/tailcat" genkey --fixed-region --key="$RUNNER_TEMP/server.private.json" > "$RUNNER_TEMP/tailcat-address.txt"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: tailcat-address
+          path: ${{ runner.temp }}/tailcat-address.txt
+          retention-days: 1
+          if-no-files-found: error
+      - name: Serve authenticated SSH to the allowed client
+        run: |
+          exec "$RUNNER_TEMP/tailcat" serve --key="$RUNNER_TEMP/server.private.json" \
+            --allow=nodekey:cad82077ebc56956b9e76164a1627088103df81e6e195d1dbb95882178c87a2b \
+            --ssh-authorized-keys='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBL5pY7nZWRNKAUVaonXYk9XX8BZUTvLQWzdgZZtxQBE coder@e2dc396df07c' ssh
