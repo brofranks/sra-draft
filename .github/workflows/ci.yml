@@ -54,9 +54,10 @@ jobs:
         borrows: [stacked, tree]
         shard:
           # Run row and relation suites here to balance the integration shards.
-          - { id: library, args: "--lib --test 'r*'" }
+          - { id: library, args: "--lib --test row --test rel" }
           - { id: integration-ab, args: "--test '[ab]*'" }
-          - { id: integration-rest, args: "--test '[!abr]*'" }
+          - { id: queries, args: "--test map --test query --test run" }
+          - { id: integration-rest, args: "--test '[!abmqr]*'" }
     name: miri (${{ matrix.target }}, ${{ matrix.borrows }} borrows, ${{ matrix.shard.id }})
     runs-on: ubuntu-latest
     timeout-minutes: 15

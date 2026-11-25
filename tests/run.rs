@@ -7,6 +7,11 @@
 //! relations, bind bit-vector rows, build sets, and list ground pairs, rows,
 //! and set values.
 
+#[path = "support/query.rs"]
+mod fixture;
+
+use fixture::{bv, tiny};
+
 use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 use std::sync::{Arc, Mutex};
@@ -18,12 +23,6 @@ use sra::query::{IntoQuery, Query, id};
 use sra::rel::Rel;
 use sra::row::Row;
 use sra::scalar::ScalarSort;
-
-/// A bound row of the bit-vector sort of width `w`.
-fn bv(cx: &mut Context, w: u32) -> Row {
-    let sort = cx.sorts().bv(w);
-    Row::bind(cx, sort)
-}
 
 /// A 4-bit set holding `values`, over the already bound row `four`.
 fn set(cx: &Context, four: &Row, values: impl IntoIterator<Item = u8>) -> Rel {
@@ -85,7 +84,7 @@ fn values(rel: &Rel) -> BTreeSet<u64> {
 
 #[test]
 fn chained_joins_traverse_every_source_in_order() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let a = relation(&cx, &four, [(1, 2), (1, 3), (2, 3)]);
     let b = relation(&cx, &four, [(2, 5), (3, 6)]);
@@ -119,7 +118,7 @@ fn chained_joins_traverse_every_source_in_order() {
 
 #[test]
 fn shared_range_subtrees_collect_and_exclude_exactly() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     // Many domain values share one range subtree. Each such suffix has one
     // pending coordinate, so the traversal recomputes it rather than
@@ -145,7 +144,7 @@ fn shared_range_subtrees_collect_and_exclude_exactly() {
 
 #[test]
 fn shared_suffixes_preserve_each_prefix_with_two_pending_coordinates() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let pair_sort = cx.sorts().product([four.sort(), four.sort()]);
     let pair = Row::bind(&mut cx, pair_sort);
@@ -180,7 +179,7 @@ fn shared_suffixes_preserve_each_prefix_with_two_pending_coordinates() {
 
 #[test]
 fn a_stored_restriction_travels_back_through_both_equations() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     // Both maps are active when the stored relation refines the last cell
     // against its current image {13, 14, 15}, so keys outside that image,
@@ -194,7 +193,7 @@ fn a_stored_restriction_travels_back_through_both_equations() {
 
 #[test]
 fn union_branches_restore_equalities_and_hide_local_cells() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let pair = cx.sorts().product([four.sort(), four.sort()]);
     let triple_sort = cx.sorts().product([pair, four.sort()]);
@@ -232,7 +231,7 @@ fn union_branches_restore_equalities_and_hide_local_cells() {
 
 #[test]
 fn equations_transfer_narrowings_along_the_whole_chain() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     // Three cells joined by two maps: restricting the last one has to travel
     // back through both equations, and a restriction disjoint from the image
@@ -253,7 +252,7 @@ fn equations_transfer_narrowings_along_the_whole_chain() {
 
 #[test]
 fn unsatisfiable_restrictions_narrow_to_nothing() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     // No equations are active, and the restriction narrows the only cell to
     // the false predicate: a disjoint set leaves nothing, and an empty set
@@ -273,7 +272,7 @@ fn unsatisfiable_restrictions_narrow_to_nothing() {
 
 #[test]
 fn borrowed_root_names_the_same_cell_as_the_handle() {
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let four = bv(&mut cx, 4);
     let s = set(&cx, &four, [1, 2, 3]);
     let mut seen = Vec::new();
@@ -296,7 +295,7 @@ fn borrowed_root_names_the_same_cell_as_the_handle() {
 fn narrowing_an_empty_cell_never_calls_the_continuation() {
     use sra::run::{Binding, Mode, Run, Slot, Visit};
 
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let two = bv(&mut cx, 2);
     let algebra = two.scalar_algebra();
     let mut eval = Run::new(
@@ -566,7 +565,7 @@ fn nested_narrowings_release_roots_on_return_break_and_panic() {
     use sra::run::{Binding, Mode, Run, Slot, Visit};
 
     let table = Table::new();
-    let mut cx = Context::default();
+    let mut cx = tiny();
     cx.register_backend("table", table.clone());
     let algebra = cx.bind("table", table.sort());
     let slots = [Slot {
@@ -613,12 +612,13 @@ fn collection_compares_contents_with_noncanonical_backend_tokens() {
     use sra::run::{Collect, Mode};
 
     let table = Table::new();
-    let mut cx = Context::default();
+    let mut cx = tiny();
     cx.register_backend("table", table.clone());
     let t = cx.sorts().record("T", &[("value", cx.sorts().bv(2))]);
     cx.bind_field(cx.sorts().project(t, 0), "table");
     let field = cx.sorts().project(t, 0);
     let two = Row::bind(&mut cx, field);
+    fixture::indexes(&cx, two.scalar_algebra());
     // Leaving value zero outside both regions puts FALSE in the first slot,
     // the attachment shape used by the k-ary collection path.
     let a = set(&cx, &two, [1]);
@@ -643,7 +643,7 @@ fn collection_compares_contents_with_noncanonical_backend_tokens() {
 fn an_empty_input_bound_skips_full_and_constrained_sources() {
     use sra::index::Index;
     use sra::run::{Binding, Exec, Mode, Run, Slot, Visit};
-    let mut cx = Context::default();
+    let mut cx = tiny();
     let row = bv(&mut cx, 2);
     let algebra = row.scalar_algebra();
     let rel = set(&cx, &row, [1]);
