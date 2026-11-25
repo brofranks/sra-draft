@@ -533,7 +533,27 @@ fn walk<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
     descend(root, 0, cells, eval, memo, mode, then)
 }
 
+/// Descends one level, growing the native stack on a fresh segment every
+/// eighth level when the remaining stack runs low.
 fn descend<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
+    root: Residual<'_>,
+    level: usize,
+    cells: Range<usize>,
+    eval: &mut Run<'_>,
+    memo: &mut M::Memo,
+    mode: &mut M,
+    then: &mut K,
+) -> Flow<M> {
+    if level != 0 && level.is_multiple_of(8) {
+        stacker::maybe_grow(256 * 1024, 2 * 1024 * 1024, || {
+            explore(root, level, cells, eval, memo, mode, then)
+        })
+    } else {
+        explore(root, level, cells, eval, memo, mode, then)
+    }
+}
+
+fn explore<M: Mode, K: FnMut(&mut Run<'_>, &mut M) -> Flow<M>>(
     root: Residual<'_>,
     level: usize,
     cells: Range<usize>,
